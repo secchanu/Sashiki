@@ -121,6 +121,14 @@ impl eframe::App for SashikiApp {
             self.render_open_dialog(ctx);
         }
 
+        if self.app.show_worktree_create_dialog {
+            self.render_worktree_create_dialog(ctx);
+        }
+
+        if self.app.show_worktree_delete_dialog {
+            self.render_worktree_delete_dialog(ctx);
+        }
+
         let any_running = self.app.sessions.sessions().iter().any(|s| s.is_terminal_running());
         if any_running {
             ctx.request_repaint();
@@ -152,6 +160,7 @@ impl SashikiApp {
                         ui.close_menu();
                     }
                 });
+
             });
         });
     }
@@ -221,6 +230,7 @@ impl SashikiApp {
             .exact_width(self.app.sidebar.width())
             .resizable(false)
             .show(ctx, |ui| {
+                // Sessions header with add button
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     ui.label(
@@ -228,6 +238,23 @@ impl SashikiApp {
                             .size(12.0)
                             .color(theme.text_secondary),
                     );
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(8.0);
+                        let has_repo = self.app.git_manager.is_some();
+                        if ui.add_enabled(
+                            has_repo,
+                            egui::Button::new(
+                                egui::RichText::new("+")
+                                    .size(14.0)
+                                    .color(if has_repo { theme.accent } else { theme.text_muted }),
+                            ).frame(false),
+                        ).on_hover_text("Create new worktree").clicked() {
+                            self.app.worktree_branch_name.clear();
+                            self.app.worktree_error = None;
+                            self.app.show_worktree_create_dialog = true;
+                        }
+                    });
                 });
                 ui.separator();
 
@@ -235,69 +262,103 @@ impl SashikiApp {
                 let sessions: Vec<_> = self.app.sessions.sessions()
                     .iter()
                     .enumerate()
-                    .map(|(i, s)| (i, s.display_name().to_string(), s.status, s.worktree.branch.clone()))
+                    .map(|(i, s)| (i, s.display_name().to_string(), s.status, s.worktree.branch.clone(), s.worktree.is_main, s.worktree.name.clone()))
                     .collect();
 
                 let mut session_to_select: Option<usize> = None;
+                let mut session_to_delete: Option<String> = None;
 
-                for (idx, name, status, branch) in sessions {
+                for (idx, name, status, branch, is_main, worktree_name) in sessions {
                     let is_active = idx == active_idx;
                     let bg = if is_active { theme.bg_tertiary } else { theme.bg_secondary };
+                    let hover_bg = theme.bg_tertiary;
 
-                    egui::Frame::none()
-                        .fill(bg)
-                        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let status_color = match status {
-                                    SessionStatus::Idle => theme.text_muted,
-                                    SessionStatus::Running => theme.accent,
-                                    SessionStatus::Completed => theme.diff_add_fg,
-                                    SessionStatus::Error => theme.diff_delete_fg,
-                                };
-                                ui.label(
-                                    egui::RichText::new(status.symbol())
-                                        .size(12.0)
-                                        .color(status_color),
-                                );
+                    // Calculate row height for proper click area
+                    let has_branch_line = branch.as_ref().map_or(false, |b| b != &name);
+                    let row_height = if has_branch_line { 40.0 } else { 24.0 };
 
-                                let name_color = if is_active { theme.text_primary } else { theme.text_secondary };
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_height),
+                        egui::Sense::click(),
+                    );
+
+                    // Handle click on row (but not if delete button was clicked)
+                    if response.clicked() {
+                        session_to_select = Some(idx);
+                    }
+
+                    // Draw background
+                    let bg_color = if response.hovered() { hover_bg } else { bg };
+                    ui.painter().rect_filled(rect, 0.0, bg_color);
+
+                    // Draw content inside the allocated rect
+                    let mut content_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(8.0, 4.0))));
+
+                    content_ui.horizontal(|ui| {
+                        let status_color = match status {
+                            SessionStatus::Idle => theme.text_muted,
+                            SessionStatus::Running => theme.accent,
+                            SessionStatus::Completed => theme.diff_add_fg,
+                            SessionStatus::Error => theme.diff_delete_fg,
+                        };
+                        ui.label(
+                            egui::RichText::new(status.symbol())
+                                .size(12.0)
+                                .color(status_color),
+                        );
+
+                        let name_color = if is_active { theme.text_primary } else { theme.text_secondary };
+                        ui.label(
+                            egui::RichText::new(&name).size(12.0).color(name_color),
+                        );
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Delete button (only for non-main worktrees)
+                            if !is_main {
                                 if ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&name).size(12.0).color(name_color),
-                                    ).sense(egui::Sense::click()),
-                                ).clicked() {
-                                    session_to_select = Some(idx);
-                                }
-
-                                if idx < 9 {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!("^{}", idx + 1))
-                                                .size(10.0)
-                                                .color(theme.text_muted),
-                                        );
-                                    });
-                                }
-                            });
-
-                            if let Some(ref branch) = branch {
-                                if branch != &name {
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(16.0);
-                                        ui.label(
-                                            egui::RichText::new(format!("⎇ {}", branch))
-                                                .size(10.0)
-                                                .color(theme.text_muted),
-                                        );
-                                    });
+                                    egui::Button::new(
+                                        egui::RichText::new("×")
+                                            .size(12.0)
+                                            .color(theme.text_muted),
+                                    ).frame(false),
+                                ).on_hover_text("Remove worktree").clicked() {
+                                    session_to_delete = Some(worktree_name.clone());
                                 }
                             }
+
+                            // Shortcut hint
+                            if idx < 9 {
+                                ui.label(
+                                    egui::RichText::new(format!("^{}", idx + 1))
+                                        .size(10.0)
+                                        .color(theme.text_muted),
+                                );
+                            }
                         });
+                    });
+
+                    if let Some(ref branch_name) = branch {
+                        if branch_name != &name {
+                            content_ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                ui.label(
+                                    egui::RichText::new(format!("⎇ {}", branch_name))
+                                        .size(10.0)
+                                        .color(theme.text_muted),
+                                );
+                            });
+                        }
+                    }
                 }
 
                 if let Some(idx) = session_to_select {
                     self.app.select_session(idx);
+                }
+
+                if let Some(name) = session_to_delete {
+                    self.app.worktree_to_delete = Some(name);
+                    self.app.worktree_error = None;
+                    self.app.show_worktree_delete_dialog = true;
                 }
 
                 ui.separator();
@@ -584,6 +645,174 @@ impl SashikiApp {
                     }
                     if ui.button("Cancel").clicked() {
                         self.app.show_open_dialog = false;
+                    }
+                });
+            });
+    }
+
+    fn render_worktree_create_dialog(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Create Worktree")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Enter the branch name for the new worktree.");
+                ui.label(
+                    egui::RichText::new("If the branch exists locally or on remote, it will be used.\nOtherwise, a new branch will be created from HEAD.")
+                        .size(11.0)
+                        .color(self.app.theme.text_muted),
+                );
+
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Branch name:");
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.app.worktree_branch_name)
+                            .desired_width(250.0)
+                            .hint_text("e.g., feature/my-feature"),
+                    );
+
+                    // Auto-focus on the text input
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let branch_name = self.app.worktree_branch_name.clone();
+                        if !branch_name.is_empty() {
+                            match self.app.create_worktree(&branch_name) {
+                                Ok(()) => {
+                                    self.app.show_worktree_create_dialog = false;
+                                    self.app.worktree_error = None;
+                                }
+                                Err(e) => {
+                                    self.app.worktree_error = Some(e);
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // Show worktree path preview
+                if !self.app.worktree_branch_name.is_empty() {
+                    if let Some(ref manager) = self.app.git_manager {
+                        let worktrees_dir = manager.worktrees_dir();
+                        let preview_path = worktrees_dir.join(&self.app.worktree_branch_name);
+                        // Normalize path separators to forward slashes for consistent display
+                        let path_str = preview_path.display().to_string().replace('\\', "/");
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Path:")
+                                    .size(11.0)
+                                    .color(self.app.theme.text_muted),
+                            );
+                            ui.label(
+                                egui::RichText::new(path_str)
+                                    .size(11.0)
+                                    .color(self.app.theme.text_secondary)
+                                    .monospace(),
+                            );
+                        });
+                    }
+                }
+
+                // Show error if any
+                if let Some(ref error) = self.app.worktree_error {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(error)
+                            .size(11.0)
+                            .color(self.app.theme.diff_delete_fg),
+                    );
+                }
+
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    let can_create = !self.app.worktree_branch_name.is_empty();
+                    if ui.add_enabled(can_create, egui::Button::new("Create")).clicked() {
+                        let branch_name = self.app.worktree_branch_name.clone();
+                        match self.app.create_worktree(&branch_name) {
+                            Ok(()) => {
+                                self.app.show_worktree_create_dialog = false;
+                                self.app.worktree_error = None;
+                            }
+                            Err(e) => {
+                                self.app.worktree_error = Some(e);
+                            }
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.app.show_worktree_create_dialog = false;
+                        self.app.worktree_error = None;
+                    }
+                });
+            });
+    }
+
+    fn render_worktree_delete_dialog(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Remove Worktree")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                let removable = self.app.get_removable_worktrees();
+
+                if removable.is_empty() {
+                    ui.label("No worktrees to remove.");
+                    ui.label(
+                        egui::RichText::new("The main worktree cannot be removed.")
+                            .size(11.0)
+                            .color(self.app.theme.text_muted),
+                    );
+                } else {
+                    ui.label("Select a worktree to remove:");
+                    ui.label(
+                        egui::RichText::new("Warning: This will delete the worktree directory and its contents.")
+                            .size(11.0)
+                            .color(self.app.theme.diff_delete_fg),
+                    );
+
+                    ui.add_space(8.0);
+
+                    for name in &removable {
+                        let is_selected = self.app.worktree_to_delete.as_ref() == Some(name);
+                        if ui.selectable_label(is_selected, name).clicked() {
+                            self.app.worktree_to_delete = Some(name.clone());
+                        }
+                    }
+                }
+
+                // Show error if any
+                if let Some(ref error) = self.app.worktree_error {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(error)
+                            .size(11.0)
+                            .color(self.app.theme.diff_delete_fg),
+                    );
+                }
+
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    let can_remove = self.app.worktree_to_delete.is_some();
+                    if ui.add_enabled(can_remove, egui::Button::new("Remove")).clicked() {
+                        if let Some(name) = self.app.worktree_to_delete.clone() {
+                            match self.app.remove_worktree(&name) {
+                                Ok(()) => {
+                                    self.app.show_worktree_delete_dialog = false;
+                                    self.app.worktree_to_delete = None;
+                                    self.app.worktree_error = None;
+                                }
+                                Err(e) => {
+                                    self.app.worktree_error = Some(e);
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.app.show_worktree_delete_dialog = false;
+                        self.app.worktree_to_delete = None;
+                        self.app.worktree_error = None;
                     }
                 });
             });

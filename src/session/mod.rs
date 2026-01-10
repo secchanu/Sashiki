@@ -98,6 +98,12 @@ impl WorktreeSession {
         self.terminal.is_running()
     }
 
+    /// Stop the terminal
+    pub fn stop_terminal(&mut self) {
+        self.terminal.stop();
+        self.status = SessionStatus::Idle;
+    }
+
     /// Update status based on terminal state
     pub fn update_status(&mut self) {
         if self.terminal.is_running() {
@@ -221,6 +227,13 @@ impl SessionManager {
     /// Find session by worktree path
     pub fn find_by_path(&self, path: &PathBuf) -> Option<usize> {
         self.sessions.iter().position(|s| &s.worktree.path == path)
+    }
+
+    /// Stop terminal for a specific session
+    pub fn stop_session_terminal(&mut self, index: usize) {
+        if let Some(session) = self.sessions.get_mut(index) {
+            session.stop_terminal();
+        }
     }
 
     /// Cycle to next session

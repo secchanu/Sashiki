@@ -14,6 +14,10 @@ pub enum GitError {
     InvalidWorktree(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+    #[error("Branch not found: {0}")]
+    BranchNotFound(String),
+    #[error("Worktree already exists: {0}")]
+    WorktreeExists(String),
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +169,175 @@ impl GitManager {
 
         String::from_utf8(blob.content().to_vec())
             .map_err(|_| GitError::InvalidWorktree("File is not valid UTF-8".to_string()))
+    }
+
+    /// Get the worktrees directory path (e.g., "repo.worktrees/")
+    pub fn worktrees_dir(&self) -> PathBuf {
+        let repo_name = self
+            .repo_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("repo");
+        let parent = self.repo_path.parent().unwrap_or(&self.repo_path);
+        parent.join(format!("{}.worktrees", repo_name))
+    }
+
+    /// Check if a branch exists locally
+    pub fn branch_exists_local(&self, branch_name: &str) -> Result<bool, GitError> {
+        let repo = self.open_repo()?;
+        let exists = repo
+            .find_branch(branch_name, git2::BranchType::Local)
+            .is_ok();
+        Ok(exists)
+    }
+
+    /// Check if a branch exists on remote
+    pub fn branch_exists_remote(&self, branch_name: &str) -> Result<bool, GitError> {
+        let repo = self.open_repo()?;
+        // Check all remotes for the branch
+        let remotes = repo.remotes()?;
+        for remote_name in remotes.iter().flatten() {
+            let remote_branch = format!("{}/{}", remote_name, branch_name);
+            if repo
+                .find_branch(&remote_branch, git2::BranchType::Remote)
+                .is_ok()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Create a new worktree
+    ///
+    /// - If branch exists locally, use it
+    /// - If branch exists on remote, create tracking branch
+    /// - Otherwise, create new branch from HEAD
+    ///
+    /// Worktree path: `{repo_parent}/{repo_name}.worktrees/{branch_name}/`
+    pub fn create_worktree(&self, branch_name: &str) -> Result<WorktreeInfo, GitError> {
+        let repo = self.open_repo()?;
+
+        // Determine worktree path
+        let worktrees_dir = self.worktrees_dir();
+        let worktree_path = worktrees_dir.join(branch_name);
+
+        // Check if worktree already exists
+        if worktree_path.exists() {
+            return Err(GitError::WorktreeExists(branch_name.to_string()));
+        }
+
+        // Create worktrees directory if it doesn't exist
+        std::fs::create_dir_all(&worktrees_dir)?;
+
+        let local_exists = self.branch_exists_local(branch_name)?;
+        let remote_exists = self.branch_exists_remote(branch_name)?;
+
+        if local_exists {
+            // Use existing local branch
+            let branch = repo.find_branch(branch_name, git2::BranchType::Local)?;
+            let reference = branch.into_reference();
+            repo.worktree(
+                branch_name,
+                &worktree_path,
+                Some(git2::WorktreeAddOptions::new().reference(Some(&reference))),
+            )?;
+        } else if remote_exists {
+            // Create local branch tracking remote
+            // First find the remote branch
+            let remotes = repo.remotes()?;
+            let mut remote_ref = None;
+            for remote_name in remotes.iter().flatten() {
+                let remote_branch_name = format!("{}/{}", remote_name, branch_name);
+                if let Ok(branch) =
+                    repo.find_branch(&remote_branch_name, git2::BranchType::Remote)
+                {
+                    remote_ref = Some(branch.into_reference());
+                    break;
+                }
+            }
+
+            if let Some(reference) = remote_ref {
+                let commit = reference.peel_to_commit()?;
+                // Create local branch
+                repo.branch(branch_name, &commit, false)?;
+                let local_branch = repo.find_branch(branch_name, git2::BranchType::Local)?;
+                let local_ref = local_branch.into_reference();
+                repo.worktree(
+                    branch_name,
+                    &worktree_path,
+                    Some(git2::WorktreeAddOptions::new().reference(Some(&local_ref))),
+                )?;
+            }
+        } else {
+            // Create new branch from HEAD
+            let head = repo.head()?;
+            let commit = head.peel_to_commit()?;
+            repo.branch(branch_name, &commit, false)?;
+            let branch = repo.find_branch(branch_name, git2::BranchType::Local)?;
+            let reference = branch.into_reference();
+            repo.worktree(
+                branch_name,
+                &worktree_path,
+                Some(git2::WorktreeAddOptions::new().reference(Some(&reference))),
+            )?;
+        }
+
+        tracing::info!(
+            "Created worktree '{}' at {:?}",
+            branch_name,
+            worktree_path
+        );
+
+        Ok(WorktreeInfo {
+            name: branch_name.to_string(),
+            path: worktree_path,
+            branch: Some(branch_name.to_string()),
+            is_main: false,
+        })
+    }
+
+    /// Remove a worktree
+    ///
+    /// This removes the worktree directory and prunes it from git
+    pub fn remove_worktree(&self, worktree_name: &str) -> Result<(), GitError> {
+        let repo = self.open_repo()?;
+
+        // Find the worktree
+        let worktree = repo.find_worktree(worktree_name).map_err(|_| {
+            GitError::InvalidWorktree(format!("Worktree '{}' not found", worktree_name))
+        })?;
+
+        let worktree_path = worktree.path().to_path_buf();
+
+        // Check if worktree is locked
+        if let Ok(git2::WorktreeLockStatus::Locked(_)) = worktree.is_locked() {
+            return Err(GitError::InvalidWorktree(format!(
+                "Worktree '{}' is locked",
+                worktree_name
+            )));
+        }
+
+        // Remove the worktree directory
+        if worktree_path.exists() {
+            std::fs::remove_dir_all(&worktree_path)?;
+        }
+
+        // Prune worktree from git
+        worktree.prune(Some(
+            git2::WorktreePruneOptions::new()
+                .valid(true)
+                .working_tree(true),
+        ))?;
+
+        tracing::info!("Removed worktree '{}' at {:?}", worktree_name, worktree_path);
+
+        Ok(())
+    }
+
+    /// Get repository path
+    pub fn repo_path(&self) -> &Path {
+        &self.repo_path
     }
 }
 

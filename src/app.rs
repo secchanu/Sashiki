@@ -48,6 +48,13 @@ pub struct App {
     // Dialog state
     pub show_open_dialog: bool,
     pub dialog_path: String,
+
+    // Worktree dialog state
+    pub show_worktree_create_dialog: bool,
+    pub worktree_branch_name: String,
+    pub show_worktree_delete_dialog: bool,
+    pub worktree_to_delete: Option<String>,
+    pub worktree_error: Option<String>,
 }
 
 /// What is currently displayed in the main view
@@ -110,6 +117,11 @@ impl App {
             path_format: PathFormat::Relative,
             show_open_dialog: false,
             dialog_path: String::new(),
+            show_worktree_create_dialog: false,
+            worktree_branch_name: String::new(),
+            show_worktree_delete_dialog: false,
+            worktree_to_delete: None,
+            worktree_error: None,
         }
     }
 
@@ -347,6 +359,102 @@ impl App {
         self.sessions.update_all_statuses();
     }
 
+    /// Create a new worktree and add a session for it
+    pub fn create_worktree(&mut self, branch_name: &str) -> Result<(), String> {
+        let git_manager = self
+            .git_manager
+            .as_ref()
+            .ok_or("No repository open")?;
+
+        // Create the worktree
+        let worktree_info = git_manager
+            .create_worktree(branch_name)
+            .map_err(|e| e.to_string())?;
+
+        // Add a new session for the worktree
+        self.sessions.add_session(worktree_info);
+
+        // Select the new session (it's at the end)
+        let new_index = self.sessions.sessions().len() - 1;
+        self.select_session(new_index);
+
+        Ok(())
+    }
+
+    /// Remove a worktree and its session
+    pub fn remove_worktree(&mut self, worktree_name: &str) -> Result<(), String> {
+        let git_manager = self
+            .git_manager
+            .as_ref()
+            .ok_or("No repository open")?;
+
+        // Find the session index
+        let session_index = self
+            .sessions
+            .sessions()
+            .iter()
+            .position(|s| s.worktree.name == worktree_name)
+            .ok_or(format!("Session for worktree '{}' not found", worktree_name))?;
+
+        // Check if it's the main worktree
+        if self.sessions.sessions()[session_index].worktree.is_main {
+            return Err("Cannot remove the main worktree".to_string());
+        }
+
+        // Stop the terminal first to release the directory lock
+        self.sessions.stop_session_terminal(session_index);
+
+        // Small delay to ensure processes have released file handles
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Remove the worktree from git
+        git_manager
+            .remove_worktree(worktree_name)
+            .map_err(|e| e.to_string())?;
+
+        // Remove the session
+        self.sessions.remove_session(session_index);
+
+        Ok(())
+    }
+
+    /// Get list of removable worktrees (non-main worktrees)
+    pub fn get_removable_worktrees(&self) -> Vec<String> {
+        self.sessions
+            .sessions()
+            .iter()
+            .filter(|s| !s.worktree.is_main)
+            .map(|s| s.worktree.name.clone())
+            .collect()
+    }
+
+    /// Refresh worktrees from git
+    pub fn refresh_worktrees(&mut self) -> Result<(), String> {
+        let git_manager = self
+            .git_manager
+            .as_ref()
+            .ok_or("No repository open")?;
+
+        let worktrees = git_manager.list_worktrees().map_err(|e| e.to_string())?;
+
+        // Remember current active session's path
+        let current_path = self.current_worktree().map(|w| w.path.clone());
+
+        // Recreate sessions
+        self.sessions = SessionManager::from_worktrees(worktrees);
+
+        // Try to restore the active session
+        if let Some(path) = current_path {
+            if let Some(idx) = self.sessions.find_by_path(&path) {
+                self.sessions.set_active(idx);
+            }
+        }
+
+        // Start terminal for active session
+        let _ = self.sessions.start_active_terminal();
+
+        Ok(())
+    }
 }
 
 impl Default for App {

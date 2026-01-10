@@ -225,6 +225,17 @@ impl Terminal {
     pub fn is_running(&self) -> bool {
         self.running
     }
+
+    /// Stop the terminal and release resources
+    pub fn stop(&mut self) {
+        // Drop writer first to close the PTY input
+        self.writer = None;
+        // Drop receiver to stop the reader thread
+        self.output_receiver = None;
+        // Drop PTY pair to release the terminal
+        self.pty_pair = None;
+        self.running = false;
+    }
 }
 
 /// Key input for terminal
