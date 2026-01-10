@@ -1,0 +1,54 @@
+[package]
+name = "sashiki"
+version = "0.1.0"
+edition = "2021"
+description = "Sashiki - Terminals for each worktree. All in one place."
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# GUI Framework
+eframe = "0.29"
+egui = "0.29"
+
+# Git operations
+git2 = "0.19"
+
+# Diff calculation
+similar = "2"
+
+# Text buffer (rope data structure)
+ropey = "1"
+
+# Configuration
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+# Path resolution (XDG directories)
+directories = "5"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Terminal emulation
+portable-pty = "0.8"
+vte = "0.13"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+pretty_assertions = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
