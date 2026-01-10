@@ -33,6 +33,9 @@ directories = "5"
 thiserror = "2"
 anyhow = "1"
 
+# Font discovery
+font-kit = "0.14"
+
 # Terminal emulation
 portable-pty = "0.8"
 vte = "0.13"

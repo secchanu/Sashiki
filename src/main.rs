@@ -5,6 +5,7 @@ mod app;
 mod buffer;
 mod config;
 mod diff;
+mod font;
 mod git;
 mod session;
 mod terminal;
@@ -62,36 +63,42 @@ impl SashikiApp {
     fn setup_fonts(ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
 
-        let font_paths = [
-            "C:\\Windows\\Fonts\\msgothic.ttc",
-            "C:\\Windows\\Fonts\\meiryo.ttc",
-            "C:\\Windows\\Fonts\\YuGothM.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
-        ];
+        // Load preferred monospace font (e.g., JetBrains Mono, Fira Code)
+        if let Some((name, data)) = font::find_monospace_font() {
+            fonts
+                .font_data
+                .insert("mono_font".to_owned(), egui::FontData::from_owned(data));
 
-        for path in &font_paths {
-            if let Ok(font_data) = std::fs::read(path) {
-                fonts.font_data.insert(
-                    "jp_font".to_owned(),
-                    egui::FontData::from_owned(font_data),
-                );
+            // Insert at the beginning of Monospace family for priority
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, "mono_font".to_owned());
 
-                fonts
-                    .families
-                    .entry(egui::FontFamily::Proportional)
-                    .or_default()
-                    .push("jp_font".to_owned());
+            tracing::info!("Loaded monospace font: {}", name);
+        }
 
-                fonts
-                    .families
-                    .entry(egui::FontFamily::Monospace)
-                    .or_default()
-                    .push("jp_font".to_owned());
+        // Load Japanese font as fallback for CJK characters
+        if let Some((name, data)) = font::find_japanese_font() {
+            fonts
+                .font_data
+                .insert("jp_font".to_owned(), egui::FontData::from_owned(data));
 
-                tracing::info!("Loaded Japanese font from: {}", path);
-                break;
-            }
+            // Add to both families as fallback (at the end)
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .push("jp_font".to_owned());
+
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("jp_font".to_owned());
+
+            tracing::info!("Loaded Japanese font: {}", name);
         }
 
         ctx.set_fonts(fonts);
