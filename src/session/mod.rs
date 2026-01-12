@@ -8,15 +8,18 @@ use crate::terminal::{Terminal, TerminalError};
 use std::path::PathBuf;
 
 /// Status of a worktree session
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SessionStatus {
     /// No activity
+    #[default]
     Idle,
     /// Terminal has active process
     Running,
-    /// Last command completed successfully
+    /// Last command completed successfully (future: status bar display)
+    #[allow(dead_code)]
     Completed,
-    /// Last command failed
+    /// Last command failed (future: status bar display)
+    #[allow(dead_code)]
     Error,
 }
 
@@ -31,12 +34,6 @@ impl SessionStatus {
     }
 }
 
-impl Default for SessionStatus {
-    fn default() -> Self {
-        SessionStatus::Idle
-    }
-}
-
 /// A session combines a worktree with its dedicated terminal
 pub struct WorktreeSession {
     /// Worktree information
@@ -48,6 +45,8 @@ pub struct WorktreeSession {
     /// Label for display (user can rename)
     pub label: Option<String>,
     /// Whether this session is pinned (won't be auto-closed)
+    /// Future: UI for pinning sessions to prevent auto-cleanup
+    #[allow(dead_code)]
     pub pinned: bool,
 }
 
@@ -82,36 +81,10 @@ impl WorktreeSession {
         Ok(())
     }
 
-    /// Send text to terminal (for click-to-insert feature)
-    pub fn insert_to_terminal(&mut self, text: &str) -> Result<(), TerminalError> {
-        self.terminal.write_str(text)
-    }
-
-    /// Send text and execute (append newline)
-    pub fn execute_in_terminal(&mut self, command: &str) -> Result<(), TerminalError> {
-        self.terminal.write_str(command)?;
-        self.terminal.write_str("\r")
-    }
-
-    /// Check if terminal is running
-    pub fn is_terminal_running(&self) -> bool {
-        self.terminal.is_running()
-    }
-
     /// Stop the terminal
     pub fn stop_terminal(&mut self) {
         self.terminal.stop();
         self.status = SessionStatus::Idle;
-    }
-
-    /// Update status based on terminal state
-    pub fn update_status(&mut self) {
-        if self.terminal.is_running() {
-            // Mark as running if terminal is active
-            if self.status == SessionStatus::Idle {
-                self.status = SessionStatus::Running;
-            }
-        }
     }
 }
 
@@ -150,7 +123,13 @@ impl SessionManager {
         if index < self.sessions.len() {
             let session = self.sessions.remove(index);
             // Adjust active index if needed
-            if self.active_index >= self.sessions.len() && !self.sessions.is_empty() {
+            if self.sessions.is_empty() {
+                self.active_index = 0;
+            } else if index < self.active_index {
+                // Removed session was before active, shift back
+                self.active_index -= 1;
+            } else if self.active_index >= self.sessions.len() {
+                // Active session was removed (was last), select previous
                 self.active_index = self.sessions.len() - 1;
             }
             Some(session)
@@ -189,14 +168,15 @@ impl SessionManager {
         &self.sessions
     }
 
-    /// Number of sessions
-    pub fn len(&self) -> usize {
-        self.sessions.len()
+    /// Get all sessions mutably
+    pub fn sessions_mut(&mut self) -> &mut [WorktreeSession] {
+        &mut self.sessions
     }
 
-    /// Check if empty
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
+    /// Number of sessions
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.sessions.len()
     }
 
     /// Start terminal for active session only
@@ -208,23 +188,20 @@ impl SessionManager {
         }
     }
 
-    /// Update all session statuses
-    pub fn update_all_statuses(&mut self) {
-        for session in &mut self.sessions {
-            session.update_status();
-        }
-    }
-
-    /// Insert text to active terminal
-    pub fn insert_to_active(&mut self, text: &str) -> Result<(), TerminalError> {
+    /// Ensure active session's terminal is running (start if not already running)
+    /// Returns Ok(true) if terminal was started, Ok(false) if already running, Err on failure
+    pub fn ensure_active_terminal_running(&mut self) -> Result<bool, crate::terminal::TerminalError> {
         if let Some(session) = self.active_mut() {
-            session.insert_to_terminal(text)
-        } else {
-            Err(TerminalError::NotRunning)
+            if !session.terminal.is_running() {
+                session.start_terminal()?;
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
 
     /// Find session by worktree path
+    #[allow(dead_code)]
     pub fn find_by_path(&self, path: &PathBuf) -> Option<usize> {
         self.sessions.iter().position(|s| &s.worktree.path == path)
     }
@@ -243,7 +220,8 @@ impl SessionManager {
         }
     }
 
-    /// Cycle to previous session
+    /// Cycle to previous session (future: Shift+Tab keybinding)
+    #[allow(dead_code)]
     pub fn prev_session(&mut self) {
         if !self.sessions.is_empty() {
             self.active_index = if self.active_index == 0 {
@@ -390,5 +368,42 @@ mod tests {
         assert_eq!(manager.find_by_path(&PathBuf::from("/tmp/main")), Some(0));
         assert_eq!(manager.find_by_path(&PathBuf::from("/tmp/feature")), Some(1));
         assert_eq!(manager.find_by_path(&PathBuf::from("/tmp/unknown")), None);
+    }
+
+    #[test]
+    fn test_remove_session_index_adjustment() {
+        let worktrees = vec![
+            create_test_worktree("a"),
+            create_test_worktree("b"),
+            create_test_worktree("c"),
+        ];
+
+        // Test: Remove session before active
+        let mut manager = SessionManager::from_worktrees(worktrees.clone());
+        manager.set_active(2); // Active is "c"
+        manager.remove_session(0); // Remove "a"
+        assert_eq!(manager.active_index(), 1); // "c" is now at index 1
+        assert_eq!(manager.active().unwrap().display_name(), "c");
+
+        // Test: Remove active session
+        let mut manager = SessionManager::from_worktrees(worktrees.clone());
+        manager.set_active(1); // Active is "b"
+        manager.remove_session(1); // Remove "b"
+        assert_eq!(manager.active_index(), 1); // Now "c" at index 1
+        assert_eq!(manager.active().unwrap().display_name(), "c");
+
+        // Test: Remove last session when it's active
+        let mut manager = SessionManager::from_worktrees(worktrees.clone());
+        manager.set_active(2); // Active is "c"
+        manager.remove_session(2); // Remove "c"
+        assert_eq!(manager.active_index(), 1); // Now "b" at index 1
+        assert_eq!(manager.active().unwrap().display_name(), "b");
+
+        // Test: Remove session after active
+        let mut manager = SessionManager::from_worktrees(worktrees);
+        manager.set_active(0); // Active is "a"
+        manager.remove_session(2); // Remove "c"
+        assert_eq!(manager.active_index(), 0); // "a" unchanged
+        assert_eq!(manager.active().unwrap().display_name(), "a");
     }
 }

@@ -6,41 +6,53 @@ description = "Sashiki - Terminals for each worktree. All in one place."
 license = "MIT"
 
 [dependencies]
+# GUI Framework
+# - iced 0.14: Elm-inspired architecture, IME support improved
+# - tokio: async runtime integration
+# - advanced: advanced text shaping for CJK support
+iced = { version = "0.14", features = ["tokio", "advanced"] }
+
 # Async runtime
+# - tokio: most mature ecosystem, iced integration via feature flag
+# - full: all features including I/O, timers, sync primitives
 tokio = { version = "1", features = ["full"] }
 
-# GUI Framework
-eframe = "0.29"
-egui = "0.29"
-
 # Git operations
+# - git2: libgit2 bindings, most comprehensive Git implementation for Rust
+# - Alternative: gix (pure Rust, but still maturing)
 git2 = "0.19"
 
 # Diff calculation
+# - similar: simple API, good performance for line-based diffs
 similar = "2"
 
-# Text buffer (rope data structure)
-ropey = "1"
-
 # Configuration
+# - toml + serde: human-readable config format, de facto standard
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 
 # Path resolution (XDG directories)
+# - directories: cross-platform config/data directory resolution
 directories = "5"
 
 # Error handling
+# - thiserror: type-safe custom error definitions
+# - anyhow: convenient error handling for application code
 thiserror = "2"
 anyhow = "1"
 
-# Font discovery
-font-kit = "0.14"
-
 # Terminal emulation
+# - portable-pty: only cross-platform PTY library available
+# - vte: mature VTE parser used by Alacritty
 portable-pty = "0.8"
 vte = "0.13"
 
+# Unicode character width
+# - Required for CJK character width calculation in terminal
+unicode-width = "0.2"
+
 # Logging
+# - tracing: structured logging with async support
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

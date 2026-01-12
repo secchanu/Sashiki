@@ -14,10 +14,10 @@ pub enum GitError {
     InvalidWorktree(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("Branch not found: {0}")]
-    BranchNotFound(String),
     #[error("Worktree already exists: {0}")]
     WorktreeExists(String),
+    #[error("Invalid branch name: {0}")]
+    InvalidBranchName(String),
 }
 
 #[derive(Debug, Clone)]
@@ -91,15 +91,20 @@ impl GitManager {
         // Add linked worktrees
         let wt_names = repo.worktrees()?;
         for wt_name in wt_names.iter().flatten() {
-            if let Ok(wt) = repo.find_worktree(wt_name) {
-                let wt_path = wt.path().to_path_buf();
-                let branch = Self::get_worktree_branch(&wt_path);
-                worktrees.push(WorktreeInfo {
-                    name: wt_name.to_string(),
-                    path: wt_path,
-                    branch,
-                    is_main: false,
-                });
+            match repo.find_worktree(wt_name) {
+                Ok(wt) => {
+                    let wt_path = wt.path().to_path_buf();
+                    let branch = Self::get_worktree_branch(&wt_path);
+                    worktrees.push(WorktreeInfo {
+                        name: wt_name.to_string(),
+                        path: wt_path,
+                        branch,
+                        is_main: false,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to find worktree '{}': {}", wt_name, e);
+                }
             }
         }
 
@@ -218,17 +223,48 @@ impl GitManager {
     pub fn create_worktree(&self, branch_name: &str) -> Result<WorktreeInfo, GitError> {
         let repo = self.open_repo()?;
 
+        // Validate branch name to prevent path traversal attacks
+        if branch_name.is_empty()
+            || branch_name.contains("..")
+            || branch_name.starts_with('/')
+            || branch_name.starts_with('\\')
+        {
+            return Err(GitError::InvalidBranchName(branch_name.to_string()));
+        }
+
         // Determine worktree path
         let worktrees_dir = self.worktrees_dir();
+
+        // Create worktrees directory first so we can canonicalize it
+        std::fs::create_dir_all(&worktrees_dir)?;
+
         let worktree_path = worktrees_dir.join(branch_name);
+
+        // Verify the path is actually under worktrees_dir (defense in depth)
+        // Use canonicalized base directory for comparison
+        let canonical_base = worktrees_dir.canonicalize()?;
+
+        // For new paths, canonicalize the parent and append the filename
+        // This works because worktrees_dir now exists after create_dir_all
+        let canonical_parent = worktree_path
+            .parent()
+            .and_then(|p| p.canonicalize().ok())
+            .unwrap_or_else(|| canonical_base.clone());
+        let file_name = worktree_path
+            .file_name()
+            .ok_or_else(|| GitError::InvalidBranchName("Invalid path".to_string()))?;
+        let canonical_path = canonical_parent.join(file_name);
+
+        if !canonical_path.starts_with(&canonical_base) {
+            return Err(GitError::InvalidBranchName(
+                "Path traversal detected".to_string(),
+            ));
+        }
 
         // Check if worktree already exists
         if worktree_path.exists() {
             return Err(GitError::WorktreeExists(branch_name.to_string()));
         }
-
-        // Create worktrees directory if it doesn't exist
-        std::fs::create_dir_all(&worktrees_dir)?;
 
         let local_exists = self.branch_exists_local(branch_name)?;
         let remote_exists = self.branch_exists_remote(branch_name)?;
@@ -318,26 +354,37 @@ impl GitManager {
             )));
         }
 
-        // Remove the worktree directory
-        if worktree_path.exists() {
-            std::fs::remove_dir_all(&worktree_path)?;
-        }
-
-        // Prune worktree from git
-        worktree.prune(Some(
+        // Prune worktree from git first (safer order)
+        // This marks it as prunable even if directory still exists
+        let prune_result = worktree.prune(Some(
             git2::WorktreePruneOptions::new()
                 .valid(true)
                 .working_tree(true),
-        ))?;
+        ));
+
+        // Remove the worktree directory
+        if worktree_path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&worktree_path) {
+                tracing::warn!("Failed to remove worktree directory: {}", e);
+                // If prune succeeded, still return Ok since git state is clean
+                if prune_result.is_ok() {
+                    tracing::info!(
+                        "Worktree '{}' pruned from git, but directory remains at {:?}",
+                        worktree_name,
+                        worktree_path
+                    );
+                    return Ok(());
+                }
+                return Err(GitError::IoError(e));
+            }
+        }
+
+        // Return prune error if it failed
+        prune_result?;
 
         tracing::info!("Removed worktree '{}' at {:?}", worktree_name, worktree_path);
 
         Ok(())
-    }
-
-    /// Get repository path
-    pub fn repo_path(&self) -> &Path {
-        &self.repo_path
     }
 }
 
@@ -418,5 +465,57 @@ mod tests {
             is_main: false,
         };
         assert_eq!(feature_wt.display_name(), "feature-x");
+    }
+
+    #[test]
+    fn test_create_worktree_already_exists() {
+        let dir = setup_test_repo();
+        let manager = GitManager::open(dir.path()).unwrap();
+
+        // Create first worktree
+        let result = manager.create_worktree("feature-test");
+        assert!(result.is_ok());
+
+        // Try to create same worktree again
+        let result = manager.create_worktree("feature-test");
+        assert!(result.is_err());
+        match result {
+            Err(GitError::WorktreeExists(name)) => {
+                assert_eq!(name, "feature-test");
+            }
+            _ => panic!("Expected WorktreeExists error"),
+        }
+    }
+
+    #[test]
+    fn test_create_worktree_path_traversal() {
+        let dir = setup_test_repo();
+        let manager = GitManager::open(dir.path()).unwrap();
+
+        // Test path traversal attempts
+        let invalid_names = vec![
+            "../escape",
+            "..\\escape",
+            "/absolute",
+            "\\absolute",
+            "",
+            "foo/../bar",
+        ];
+
+        for name in invalid_names {
+            let result = manager.create_worktree(name);
+            assert!(
+                result.is_err(),
+                "Expected error for branch name: {:?}",
+                name
+            );
+            match result {
+                Err(GitError::InvalidBranchName(_)) => {}
+                other => panic!(
+                    "Expected InvalidBranchName for {:?}, got {:?}",
+                    name, other
+                ),
+            }
+        }
     }
 }

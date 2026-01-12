@@ -19,17 +19,12 @@ pub enum ConfigError {
     NoConfigDir,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
+    #[default]
     Dark,
     Light,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Self::Dark
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,15 +42,9 @@ impl Default for FontConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TerminalConfig {
     pub shell_path: Option<String>,
-}
-
-impl Default for TerminalConfig {
-    fn default() -> Self {
-        Self { shell_path: None }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
