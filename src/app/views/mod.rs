@@ -4,6 +4,7 @@ mod dialogs;
 mod file_list;
 mod main_content;
 mod sidebar;
+pub mod split;
 mod status_bar;
 mod terminal;
 mod terminal_widget;

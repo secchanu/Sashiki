@@ -1,5 +1,6 @@
 //! Main content area views (welcome, file, editor, diff, changed files)
 
+use super::split::horizontal_split;
 use crate::app::message::Message;
 use crate::diff::{to_side_by_side, DiffLineType, DiffResult};
 use crate::git::FileStatus;
@@ -190,6 +191,8 @@ pub fn view_editor<'a>(
 pub fn view_diff<'a>(
     path: &Path,
     diff_result: Option<&DiffResult>,
+    split_position: f32,
+    content_width: f32,
     palette: &'a Palette,
 ) -> Element<'a, Message> {
     let path_clone = path.to_path_buf();
@@ -226,6 +229,9 @@ pub fn view_diff<'a>(
 
     let diff_content: Element<Message> = if let Some(result) = diff_result {
         let side_by_side = to_side_by_side(result);
+
+        let bg_secondary = palette.bg_secondary;
+        let border_color = palette.border;
 
         let left_lines = Column::with_children(
             side_by_side
@@ -297,37 +303,49 @@ pub fn view_diff<'a>(
         )
         .spacing(0);
 
-        let bg_secondary = palette.bg_secondary;
-        let border_color = palette.border;
+        let left_pane: Element<'a, Message> =
+            container(scrollable(left_lines).height(Length::Fill))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_theme| container::Style {
+                    background: Some(bg_secondary.into()),
+                    border: iced::Border {
+                        color: border_color,
+                        width: 1.0,
+                        radius: 0.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .into();
 
-        let left_pane = container(scrollable(left_lines).height(Length::Fill))
-            .width(Length::FillPortion(1))
-            .style(move |_theme| container::Style {
-                background: Some(bg_secondary.into()),
-                border: iced::Border {
-                    color: border_color,
-                    width: 1.0,
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
-            });
+        let right_pane: Element<'a, Message> =
+            container(scrollable(right_lines).height(Length::Fill))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_theme| container::Style {
+                    background: Some(bg_secondary.into()),
+                    border: iced::Border {
+                        color: border_color,
+                        width: 1.0,
+                        radius: 0.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .into();
 
-        let right_pane = container(scrollable(right_lines).height(Length::Fill))
-            .width(Length::FillPortion(1))
-            .style(move |_theme| container::Style {
-                background: Some(bg_secondary.into()),
-                border: iced::Border {
-                    color: border_color,
-                    width: 1.0,
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
-            });
+        // Calculate split position in pixels from ratio
+        // content_width is the available width for the diff view
+        let split_at = (split_position * content_width).clamp(100.0, content_width - 100.0);
 
-        row![left_pane, right_pane]
-            .spacing(2)
-            .height(Length::Fill)
-            .into()
+        horizontal_split(left_pane, right_pane, split_at, move |new_pos| {
+            // Convert pixel position back to ratio
+            Message::DiffSplitRatioChanged(new_pos / content_width)
+        })
+        .on_resize_end(|| Message::SaveLayout)
+        .min_first(100.0)
+        .min_second(100.0)
+        .handle_colors(palette.border, palette.accent)
+        .into()
     } else {
         text("No diff available")
             .color(palette.text_muted)

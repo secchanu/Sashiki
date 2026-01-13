@@ -54,4 +54,10 @@ pub enum Message {
 
     // Window
     WindowResized(Size),
+
+    // Layout resize
+    SidebarWidthChanged(f32),
+    TerminalHeightChanged(f32),
+    DiffSplitRatioChanged(f32),
+    SaveLayout,
 }

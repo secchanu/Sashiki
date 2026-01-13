@@ -52,7 +52,6 @@ pub struct LayoutConfig {
     pub sidebar_width: f32,
     pub terminal_height: f32,
     pub terminal_visible: bool,
-    pub split_horizontal: bool,
     pub split_ratio: f32,
 }
 
@@ -62,7 +61,6 @@ impl Default for LayoutConfig {
             sidebar_width: 200.0,
             terminal_height: 200.0,
             terminal_visible: true,
-            split_horizontal: true,
             split_ratio: 0.5,
         }
     }
@@ -100,6 +98,17 @@ impl Config {
 
     pub fn load_or_default() -> Self {
         Self::load().unwrap_or_default()
+    }
+
+    /// Save configuration to file
+    pub fn save(&self) -> Result<(), ConfigError> {
+        let path = Self::config_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
     }
 }
 

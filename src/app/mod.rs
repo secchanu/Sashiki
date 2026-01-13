@@ -23,13 +23,12 @@ use iced::event::{self, Event};
 use iced::keyboard::{key::Named, Key, Modifiers};
 use iced::widget::{button, column, container, row, text_editor};
 use iced::{Element, Length, Size, Subscription, Task, Theme};
+use views::split::{horizontal_split, vertical_split, HANDLE_WIDTH};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 // Layout constants
-const DEFAULT_SIDEBAR_WIDTH: f32 = 200.0;
-const DEFAULT_TERMINAL_HEIGHT: f32 = 200.0;
 const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 800.0;
 // Approximate character dimensions for 14px monospace font
@@ -56,6 +55,8 @@ pub struct Sashiki {
     terminal_visible: bool,
     terminal_height: f32,
     sidebar_width: f32,
+    diff_split_ratio: f32,
+    config: Config,
     show_open_dialog: bool,
     dialog_path: String,
     show_worktree_dialog: bool,
@@ -96,9 +97,11 @@ impl Sashiki {
             sessions: SessionManager::new(),
             current_view: ViewState::Welcome,
             diff_result: None,
-            terminal_visible: true,
-            terminal_height: DEFAULT_TERMINAL_HEIGHT,
-            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            terminal_visible: config.layout.terminal_visible,
+            terminal_height: config.layout.terminal_height,
+            sidebar_width: config.layout.sidebar_width,
+            diff_split_ratio: config.layout.split_ratio,
+            config,
             show_open_dialog: false,
             dialog_path: String::new(),
             show_worktree_dialog: false,
@@ -325,27 +328,83 @@ impl Sashiki {
                 self.window_size = size;
                 self.resize_terminal();
             }
+            Message::SidebarWidthChanged(width) => {
+                self.sidebar_width = width.clamp(100.0, 600.0);
+                self.resize_terminal();
+            }
+            Message::TerminalHeightChanged(height) => {
+                let max = (self.window_size.height * 0.8).max(50.0);
+                self.terminal_height = height.clamp(50.0, max);
+                self.resize_terminal();
+            }
+            Message::DiffSplitRatioChanged(ratio) => {
+                self.diff_split_ratio = ratio.clamp(0.2, 0.8);
+            }
+            Message::SaveLayout => {
+                self.config.layout.sidebar_width = self.sidebar_width;
+                self.config.layout.terminal_height = self.terminal_height;
+                self.config.layout.terminal_visible = self.terminal_visible;
+                self.config.layout.split_ratio = self.diff_split_ratio;
+                if let Err(e) = self.config.save() {
+                    tracing::warn!("Failed to save layout: {}", e);
+                }
+            }
         }
         Task::none()
     }
 
     /// Render the application view
     pub fn view(&self) -> Element<'_, Message> {
-        let content = row![self.view_sidebar(), self.view_main_content(),];
+        // Build main content with horizontal split (sidebar | main)
+        let main_split = horizontal_split(
+            self.view_sidebar(),
+            self.view_main_content(),
+            self.sidebar_width,
+            Message::SidebarWidthChanged,
+        )
+        .on_resize_end(|| Message::SaveLayout)
+        .min_first(100.0)
+        .min_second(200.0)
+        .handle_colors(self.palette.border, self.palette.accent);
 
-        let mut layout = column![self.view_menu_bar(), content,];
+        // Build layout with optional terminal split
+        let content: Element<'_, Message> = if self.terminal_visible {
+            // Calculate the height for the main area
+            // Menu bar ~32px, Status bar ~28px
+            const MENU_HEIGHT: f32 = 32.0;
+            const STATUS_HEIGHT: f32 = 28.0;
+            let available_height = self.window_size.height - MENU_HEIGHT - STATUS_HEIGHT;
+            let main_height = available_height - self.terminal_height;
 
-        if self.terminal_visible {
-            layout = layout.push(views::view_terminal(
-                self.sessions.active(),
-                self.terminal_focused,
-                self.terminal_height,
-                &self.palette,
-                &self.preedit_text,
-            ));
-        }
+            vertical_split(
+                main_split,
+                views::view_terminal(
+                    self.sessions.active(),
+                    self.terminal_focused,
+                    self.terminal_height,
+                    &self.palette,
+                    &self.preedit_text,
+                ),
+                main_height.max(100.0),
+                move |new_height| {
+                    let terminal_height = available_height - new_height;
+                    Message::TerminalHeightChanged(terminal_height)
+                },
+            )
+            .on_resize_end(|| Message::SaveLayout)
+            .min_first(100.0)
+            .min_second(50.0)
+            .handle_colors(self.palette.border, self.palette.accent)
+            .into()
+        } else {
+            main_split.into()
+        };
 
-        layout = layout.push(views::view_status_bar(&self.sessions, &self.palette));
+        let layout = column![
+            self.view_menu_bar(),
+            content,
+            views::view_status_bar(&self.sessions, &self.palette)
+        ];
 
         let base: Element<Message> = container(layout)
             .width(Length::Fill)
@@ -459,7 +518,10 @@ impl Sashiki {
                 &self.palette,
             ),
             ViewState::Diff { path } => {
-                views::view_diff(path, self.diff_result.as_ref(), &self.palette)
+                // Calculate content width: window - sidebar - splitter handle - container padding
+                // Ensure minimum width for diff view (min_first + min_second + handle = 204)
+                let content_width = (self.window_size.width - self.sidebar_width - HANDLE_WIDTH - 32.0).max(204.0);
+                views::view_diff(path, self.diff_result.as_ref(), self.diff_split_ratio, content_width, &self.palette)
             }
         };
 
