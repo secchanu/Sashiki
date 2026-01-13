@@ -74,6 +74,8 @@ pub struct Sashiki {
     cached_all_files: Vec<PathBuf>,
     cache_updated_at: Option<Instant>,
     cache_worktree_path: Option<PathBuf>,
+    // IME preedit text (composition in progress)
+    preedit_text: String,
 }
 
 impl Sashiki {
@@ -114,6 +116,7 @@ impl Sashiki {
             cached_all_files: Vec::new(),
             cache_updated_at: None,
             cache_worktree_path: None,
+            preedit_text: String::new(),
         };
 
         if let Ok(cwd) = std::env::current_dir() {
@@ -146,6 +149,9 @@ impl Sashiki {
             }
             Message::TerminalFocus(focused) => {
                 self.terminal_focused = focused;
+                if !focused {
+                    self.preedit_text.clear();
+                }
             }
             Message::TerminalTick => {
                 for session in self.sessions.sessions_mut() {
@@ -292,9 +298,27 @@ impl Sashiki {
                     self.expanded_dirs.insert(path);
                 }
             }
-            Message::KeyPressed(key, modifiers) => {
-                if let Some(task) = self.handle_keyboard(key, modifiers) {
+            Message::KeyPressed(key, modifiers, text) => {
+                if let Some(task) = self.handle_keyboard(key, modifiers, text) {
                     return task;
+                }
+            }
+            Message::ImeCommit(text) => {
+                // Clear preedit text when committed
+                self.preedit_text.clear();
+                // Send IME-committed text to terminal when focused
+                if self.terminal_focused && self.terminal_visible {
+                    if let Some(session) = self.sessions.active_mut() {
+                        if let Err(e) = session.terminal.write_str(&text) {
+                            tracing::debug!("Failed to write IME text to terminal: {}", e);
+                        }
+                    }
+                }
+            }
+            Message::ImePreedit(text) => {
+                // Store preedit text for display
+                if self.terminal_focused && self.terminal_visible {
+                    self.preedit_text = text;
                 }
             }
             Message::WindowResized(size) => {
@@ -317,6 +341,7 @@ impl Sashiki {
                 self.terminal_focused,
                 self.terminal_height,
                 &self.palette,
+                &self.preedit_text,
             ));
         }
 
@@ -370,10 +395,19 @@ impl Sashiki {
     /// Subscriptions for background events
     pub fn subscription(&self) -> Subscription<Message> {
         let events = event::listen_with(|event, _status, _id| match event {
-            Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                Some(Message::KeyPressed(key, modifiers))
-            }
+            Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key,
+                modifiers,
+                text,
+                ..
+            }) => Some(Message::KeyPressed(key, modifiers, text.map(|s| s.to_string()))),
             Event::Window(iced::window::Event::Resized(size)) => Some(Message::WindowResized(size)),
+            Event::InputMethod(iced::advanced::input_method::Event::Commit(text)) => {
+                Some(Message::ImeCommit(text))
+            }
+            Event::InputMethod(iced::advanced::input_method::Event::Preedit(text, _)) => {
+                Some(Message::ImePreedit(text))
+            }
             _ => None,
         });
 
@@ -438,7 +472,12 @@ impl Sashiki {
 
     // --- Keyboard handling ---
 
-    fn handle_keyboard(&mut self, key: Key, modifiers: Modifiers) -> Option<Task<Message>> {
+    fn handle_keyboard(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        text: Option<String>,
+    ) -> Option<Task<Message>> {
         if modifiers.control() {
             match &key {
                 Key::Character(c) if c.as_str() == "o" => {
@@ -503,6 +542,19 @@ impl Sashiki {
             self.show_open_dialog || self.show_worktree_dialog || self.pending_delete_worktree.is_some();
 
         if self.terminal_focused && self.terminal_visible && !dialog_open {
+            // Prefer text field if available (includes IME-composed characters)
+            if let Some(ref input_text) = text {
+                if !input_text.is_empty() {
+                    if let Some(session) = self.sessions.active_mut() {
+                        if let Err(e) = session.terminal.write_str(input_text) {
+                            tracing::debug!("Failed to write text to terminal: {}", e);
+                        }
+                    }
+                    return None;
+                }
+            }
+
+            // Fall back to key-based conversion for special keys
             let bytes = keyboard::key_to_terminal_bytes(&key, &modifiers);
             if !bytes.is_empty() {
                 if let Some(session) = self.sessions.active_mut() {

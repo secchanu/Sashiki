@@ -45,8 +45,12 @@ pub enum Message {
     ToggleFileListMode,
     ToggleDir(PathBuf),
 
-    // Keyboard
-    KeyPressed(Key, Modifiers),
+    // Keyboard (key, modifiers, text - text contains IME-composed characters)
+    KeyPressed(Key, Modifiers, Option<String>),
+
+    // IME (Input Method Editor)
+    ImeCommit(String),
+    ImePreedit(String),
 
     // Window
     WindowResized(Size),

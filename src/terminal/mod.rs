@@ -295,6 +295,15 @@ impl Terminal {
             String::new()
         }
     }
+
+    /// Get cursor position (row, col) from terminal state
+    pub fn get_cursor_position(&self) -> (usize, usize) {
+        if let Ok(state) = self.state.lock() {
+            (state.cursor.row, state.cursor.col)
+        } else {
+            (0, 0)
+        }
+    }
 }
 
 #[cfg(test)]

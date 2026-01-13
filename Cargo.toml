@@ -41,9 +41,9 @@ directories = "5"
 thiserror = "2"
 anyhow = "1"
 
-# Terminal emulation
-# - portable-pty: only cross-platform PTY library available
-# - vte: mature VTE parser used by Alacritty
+# Terminal emulation (for fallback/existing implementation)
+# - portable-pty: cross-platform PTY library
+# - vte: VTE parser used by Alacritty
 portable-pty = "0.8"
 vte = "0.13"
 
