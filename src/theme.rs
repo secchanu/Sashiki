@@ -1,105 +1,56 @@
-//! Theme module for Sashiki
+//! Color theme definitions (Yukidama UI Dark Mode)
 //!
-//! Defines colors, styling, and button styles for the application.
+//! Based on yukidama-ui design system for visual consistency.
+//! Usage: `rgb(theme::BG_BASE)` or `rgba(theme::OVERLAY)`
 
-use iced::widget::button;
-use iced::{Color, Theme};
+// Monospace font for terminal and code display
+pub const MONOSPACE_FONT: &str = "Consolas";
 
-/// Application color palette
-#[derive(Debug, Clone)]
-pub struct Palette {
-    pub bg_primary: Color,
-    pub bg_secondary: Color,
-    pub bg_tertiary: Color,
-    pub text_primary: Color,
-    pub text_secondary: Color,
-    pub text_muted: Color,
-    pub accent: Color,
-    pub border: Color,
-    pub diff_add_bg: Color,
-    pub diff_add_fg: Color,
-    pub diff_delete_bg: Color,
-    pub diff_delete_fg: Color,
-}
+// Background colors (RGB format: 0xRRGGBB, use with rgb())
+// From yukidama-ui neutral palette (dark mode)
+pub const BG_BASE: u32 = 0x020617; // neutral[950] - darkest base
+pub const BG_MANTLE: u32 = 0x0f172a; // neutral[900] - surface
+pub const BG_SURFACE0: u32 = 0x1e293b; // neutral[800] - elevated
+pub const BG_SURFACE1: u32 = 0x334155; // neutral[700] - subtle
+pub const BG_SURFACE2: u32 = 0x475569; // neutral[600] - strong
 
-impl Default for Palette {
-    fn default() -> Self {
-        Self::dark()
-    }
-}
+// Overlay color (RGBA format: 0xRRGGBBAA, use with rgba())
+pub const OVERLAY: u32 = 0x000000B3; // rgba(0, 0, 0, 0.7)
 
-impl Palette {
-    pub fn dark() -> Self {
-        Self {
-            bg_primary: Color::from_rgb8(0x1e, 0x1e, 0x2e),
-            bg_secondary: Color::from_rgb8(0x28, 0x28, 0x3c),
-            bg_tertiary: Color::from_rgb8(0x32, 0x32, 0x4a),
-            text_primary: Color::from_rgb8(0xcd, 0xd6, 0xf4),
-            text_secondary: Color::from_rgb8(0xa6, 0xad, 0xc8),
-            text_muted: Color::from_rgb8(0x6c, 0x70, 0x86),
-            accent: Color::from_rgb8(0x89, 0xb4, 0xfa),
-            border: Color::from_rgb8(0x45, 0x47, 0x5a),
-            diff_add_bg: Color::from_rgba8(0xa6, 0xe3, 0xa1, 0.2),
-            diff_add_fg: Color::from_rgb8(0xa6, 0xe3, 0xa1),
-            diff_delete_bg: Color::from_rgba8(0xf3, 0x8b, 0xa8, 0.2),
-            diff_delete_fg: Color::from_rgb8(0xf3, 0x8b, 0xa8),
-        }
-    }
+// Text colors (from yukidama-ui semantic dark mode)
+pub const TEXT: u32 = 0xf7f9fb; // neutral[50] - primary text
+pub const TEXT_SECONDARY: u32 = 0x94a3b8; // neutral[400] - secondary text
+pub const TEXT_MUTED: u32 = 0x64748b; // neutral[500] - tertiary/muted
 
-    pub fn light() -> Self {
-        Self {
-            bg_primary: Color::from_rgb8(0xef, 0xf1, 0xf5),
-            bg_secondary: Color::from_rgb8(0xe6, 0xe9, 0xef),
-            bg_tertiary: Color::from_rgb8(0xdc, 0xe0, 0xe8),
-            text_primary: Color::from_rgb8(0x4c, 0x4f, 0x69),
-            text_secondary: Color::from_rgb8(0x6c, 0x6f, 0x85),
-            text_muted: Color::from_rgb8(0x9c, 0xa0, 0xb0),
-            accent: Color::from_rgb8(0x1e, 0x66, 0xf5),
-            border: Color::from_rgb8(0xcc, 0xd0, 0xda),
-            diff_add_bg: Color::from_rgba8(0x40, 0xa0, 0x2b, 0.15),
-            diff_add_fg: Color::from_rgb8(0x40, 0xa0, 0x2b),
-            diff_delete_bg: Color::from_rgba8(0xd2, 0x00, 0x36, 0.15),
-            diff_delete_fg: Color::from_rgb8(0xd2, 0x00, 0x36),
-        }
-    }
-}
+// Accent colors (using yukidama-ui palette, 400 level for dark mode visibility)
+pub const BLUE: u32 = 0x5a92d6; // primary[400] - main theme color
+pub const GREEN: u32 = 0x34d399; // success[400]
+pub const RED: u32 = 0xf87171; // error[400]
+pub const YELLOW: u32 = 0xfbbf24; // warning[400]
+pub const MAUVE: u32 = 0x9c70d1; // secondary[400] - purple
+pub const TEAL: u32 = 0x2ecece; // accent[400] - cyan
+pub const PEACH: u32 = 0xfcd34d; // warning[300] - lighter amber
+pub const PINK: u32 = 0xb493de; // secondary[300] - lighter purple
+pub const ROSEWATER: u32 = 0xc4ced9; // neutral[300] - soft highlight
+pub const MAROON: u32 = 0xfca5a5; // error[300] - soft red
 
-/// Standard button style with good contrast
-pub fn button_style(_theme: &Theme, status: button::Status) -> button::Style {
-    let bg = match status {
-        button::Status::Active => Color::from_rgb(0.25, 0.25, 0.27),
-        button::Status::Hovered => Color::from_rgb(0.35, 0.35, 0.38),
-        button::Status::Pressed => Color::from_rgb(0.20, 0.20, 0.22),
-        button::Status::Disabled => Color::from_rgb(0.15, 0.15, 0.15),
-    };
-    button::Style {
-        background: Some(bg.into()),
-        text_color: Color::from_rgb(0.9, 0.9, 0.9),
-        border: iced::Border {
-            color: Color::from_rgb(0.4, 0.4, 0.42),
-            width: 1.0,
-            radius: 3.0.into(),
-        },
-        ..Default::default()
-    }
-}
+// Diff colors (based on success/error 950 tints)
+pub const DIFF_ADDED_BG: u32 = 0x052e16; // success[950]
+pub const DIFF_REMOVED_BG: u32 = 0x450a0a; // error[950]
 
-/// Accent button style for primary actions
-pub fn accent_button_style(_theme: &Theme, status: button::Status) -> button::Style {
-    let bg = match status {
-        button::Status::Active => Color::from_rgb(0.0, 0.47, 0.8),
-        button::Status::Hovered => Color::from_rgb(0.0, 0.55, 0.9),
-        button::Status::Pressed => Color::from_rgb(0.0, 0.40, 0.7),
-        button::Status::Disabled => Color::from_rgb(0.2, 0.3, 0.4),
-    };
-    button::Style {
-        background: Some(bg.into()),
-        text_color: Color::WHITE,
-        border: iced::Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: 3.0.into(),
-        },
-        ..Default::default()
-    }
+// Terminal ANSI colors (aligned with yukidama-ui palette)
+pub mod ansi {
+    pub const BLACK: u32 = 0x334155; // neutral[700]
+    pub const RED: u32 = 0xf87171; // error[400]
+    pub const GREEN: u32 = 0x34d399; // success[400]
+    pub const YELLOW: u32 = 0xfbbf24; // warning[400]
+    pub const BLUE: u32 = 0x5a92d6; // primary[400]
+    pub const MAGENTA: u32 = 0x9c70d1; // secondary[400]
+    pub const CYAN: u32 = 0x2ecece; // accent[400]
+    pub const WHITE: u32 = 0xc4ced9; // neutral[300]
+    pub const BRIGHT_BLACK: u32 = 0x475569; // neutral[600]
+    pub const BRIGHT_WHITE: u32 = 0xf7f9fb; // neutral[50]
+    pub const FOREGROUND: u32 = 0xf7f9fb; // neutral[50]
+    pub const BACKGROUND: u32 = 0x020617; // neutral[950]
+    pub const CURSOR: u32 = 0x5a92d6; // primary[400] - theme color
 }
