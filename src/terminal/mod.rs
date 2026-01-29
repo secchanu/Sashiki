@@ -1,8 +1,16 @@
 //! Terminal emulator using alacritty_terminal
 //!
 //! This module provides terminal functionality integrated with GPUI.
+//!
+//! ## Module structure
+//! - `view`: Main TerminalView struct, initialization, mouse/IME handling, Render
+//! - `keybindings`: Action definitions, key bindings, action handlers
+//! - `element`: TerminalElement for custom GPUI rendering
 
+mod element;
+mod keybindings;
 mod view;
+
 pub use view::TerminalView;
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, Notify, WindowSize};
@@ -17,7 +25,7 @@ use std::sync::Arc;
 pub struct Terminal {
     term: Arc<FairMutex<Term<TerminalEventListener>>>,
     pty_tx: Notifier,
-    #[allow(dead_code)]
+    /// Current terminal size (cols, lines) for deduplication
     current_size: std::sync::Mutex<(u16, u16)>,
 }
 
@@ -52,10 +60,12 @@ impl Terminal {
     pub fn new(
         working_directory: Option<std::path::PathBuf>,
     ) -> anyhow::Result<(Self, smol::channel::Receiver<TerminalEvent>)> {
+        // Buffer size 100 allows burst of terminal events without blocking PTY thread
         let (event_tx, event_rx) = smol::channel::bounded(100);
         let listener = TerminalEventListener { sender: event_tx };
 
         let config = TermConfig::default();
+        // 80x24 is the VT100 standard terminal size, used as initial default
         let term_size = TermSize::new(80, 24);
         let term = Term::new(config, &term_size, listener.clone());
         let term = Arc::new(FairMutex::new(term));
@@ -67,7 +77,9 @@ impl Terminal {
             ..Default::default()
         };
 
-        // Cell dimensions are approximate; actual rendering uses font metrics
+        // Initial PTY window size. Cell dimensions (10x20) are placeholder values;
+        // actual rendering calculates precise dimensions from font metrics.
+        // These values are used by the PTY for initial SIGWINCH reporting.
         let window_size = WindowSize {
             num_lines: 24,
             num_cols: 80,
@@ -108,7 +120,6 @@ impl Terminal {
     }
 
     /// Resize the terminal to new dimensions
-    #[allow(dead_code)]
     pub fn resize(&self, cols: u16, lines: u16, cell_width: u16, cell_height: u16) {
         // Check if size actually changed
         {
@@ -140,19 +151,9 @@ impl Terminal {
     }
 
     /// Scroll the terminal viewport
-    #[allow(dead_code)]
     pub fn scroll(&self, scroll: Scroll) {
         let mut term = self.term.lock();
         term.scroll_display(scroll);
-    }
-
-    /// Get current terminal size (cols, lines)
-    #[allow(dead_code)]
-    pub fn size(&self) -> (u16, u16) {
-        self.current_size
-            .lock()
-            .map(|guard| *guard)
-            .unwrap_or((80, 24))
     }
 
     pub fn with_term<F, R>(&self, f: F) -> R
@@ -161,14 +162,5 @@ impl Terminal {
     {
         let term = self.term.lock();
         f(&term)
-    }
-
-    #[allow(dead_code)]
-    pub fn with_term_mut<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut Term<TerminalEventListener>) -> R,
-    {
-        let mut term = self.term.lock();
-        f(&mut term)
     }
 }

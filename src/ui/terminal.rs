@@ -6,6 +6,17 @@ use crate::theme::*;
 use crate::ui::{render_locked_badge, render_main_badge};
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, rgb};
 
+/// Properties for rendering a terminal header
+struct TerminalHeaderProps {
+    name: String,
+    branch: Option<String>,
+    color: u32,
+    status: SessionStatus,
+    is_main: bool,
+    is_locked: bool,
+    path_display: String,
+}
+
 impl SashikiApp {
     pub fn render_terminal_area(&self, cx: &Context<Self>) -> AnyElement {
         match self.session_manager.layout_mode() {
@@ -100,6 +111,9 @@ impl SashikiApp {
         let terminal_content: AnyElement = if let Some(terminal) = session.active_terminal() {
             div()
                 .flex_1()
+                .w_full()
+                .flex()
+                .flex_col()
                 .overflow_hidden()
                 .child(terminal.clone())
                 .into_any_element()
@@ -128,7 +142,7 @@ impl SashikiApp {
             })
             .rounded_md()
             .m_1()
-            .child(self.render_terminal_header(
+            .child(self.render_terminal_header(TerminalHeaderProps {
                 name,
                 branch,
                 color,
@@ -136,22 +150,22 @@ impl SashikiApp {
                 is_main,
                 is_locked,
                 path_display,
-            ))
+            }))
             .child(terminal_content)
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_terminal_header(
-        &self,
-        name: String,
-        branch: Option<String>,
-        color: u32,
-        status: SessionStatus,
-        is_main: bool,
-        is_locked: bool,
-        path_display: String,
-    ) -> impl IntoElement {
+    fn render_terminal_header(&self, props: TerminalHeaderProps) -> impl IntoElement {
+        let TerminalHeaderProps {
+            name,
+            branch,
+            color,
+            status,
+            is_main,
+            is_locked,
+            path_display,
+        } = props;
+
         div()
             .h_8()
             .px_3()

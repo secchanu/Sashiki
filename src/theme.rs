@@ -39,6 +39,7 @@ pub const DIFF_ADDED_BG: u32 = 0x052e16; // success[950]
 pub const DIFF_REMOVED_BG: u32 = 0x450a0a; // error[950]
 
 // Terminal ANSI colors (aligned with yukidama-ui palette)
+// Normal colors use [400] level, bright colors use [300] level for dark mode
 pub mod ansi {
     pub const BLACK: u32 = 0x334155; // neutral[700]
     pub const RED: u32 = 0xf87171; // error[400]
@@ -49,6 +50,12 @@ pub mod ansi {
     pub const CYAN: u32 = 0x2ecece; // accent[400]
     pub const WHITE: u32 = 0xc4ced9; // neutral[300]
     pub const BRIGHT_BLACK: u32 = 0x475569; // neutral[600]
+    pub const BRIGHT_RED: u32 = 0xfca5a5; // error[300]
+    pub const BRIGHT_GREEN: u32 = 0x6ee7b7; // success[300]
+    pub const BRIGHT_YELLOW: u32 = 0xfde68a; // warning[300]
+    pub const BRIGHT_BLUE: u32 = 0x93c5fd; // primary[300]
+    pub const BRIGHT_MAGENTA: u32 = 0xb493de; // secondary[300]
+    pub const BRIGHT_CYAN: u32 = 0x67e8f9; // accent[300]
     pub const BRIGHT_WHITE: u32 = 0xf7f9fb; // neutral[50]
     pub const FOREGROUND: u32 = 0xf7f9fb; // neutral[50]
     pub const BACKGROUND: u32 = 0x020617; // neutral[950]

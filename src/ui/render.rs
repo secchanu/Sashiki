@@ -1,6 +1,6 @@
 //! Render trait implementation for SashikiApp
 
-use crate::app::*;
+use crate::app::SashikiApp;
 use crate::dialog::ActiveDialog;
 use crate::session::LayoutMode;
 use crate::theme::*;
@@ -193,6 +193,8 @@ impl SashikiApp {
                     .child(
                         div()
                             .flex_1()
+                            .flex()
+                            .flex_col()
                             .overflow_hidden()
                             .child(self.render_terminal_area(cx)),
                     ),
