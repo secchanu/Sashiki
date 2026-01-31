@@ -12,14 +12,47 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
+use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AsyncApp, Bounds, Context, EntityInputHandler, FocusHandle, Focusable, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseMoveEvent, ParentElement, Pixels, Render,
     ScrollWheelEvent, Styled, UTF16Selection, WeakEntity, Window, div, rgb,
 };
+use regex::Regex;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
+
+static URL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"https?://[^\s\x00-\x1f\x7f<>"'\)\]]+"#).unwrap());
+
+/// A URL detected in the terminal output, with its screen coordinates.
+#[derive(Clone, Debug)]
+pub(super) struct DetectedUrl {
+    pub url: String,
+    /// Start position (screen line, column)
+    pub start: (usize, usize),
+    /// End position (screen line, column) - inclusive
+    pub end: (usize, usize),
+}
+
+impl DetectedUrl {
+    /// Check if a screen position falls within this URL's range
+    fn contains_point(&self, screen_line: usize, col: usize) -> bool {
+        if screen_line < self.start.0 || screen_line > self.end.0 {
+            return false;
+        }
+        if self.start.0 == self.end.0 {
+            screen_line == self.start.0 && col >= self.start.1 && col <= self.end.1
+        } else if screen_line == self.start.0 {
+            col >= self.start.1
+        } else if screen_line == self.end.0 {
+            col <= self.end.1
+        } else {
+            true
+        }
+    }
+}
 
 /// Cached cell data from terminal grid.
 /// Copied from alacritty_terminal to ensure consistent state during rendering.
@@ -109,6 +142,10 @@ pub struct TerminalView {
     /// Cached terminal content to ensure consistent state during rendering.
     /// Updated after all events are processed, used by build_layout().
     cached_content: Option<CachedContent>,
+    /// URLs detected in the current terminal content
+    pub(super) detected_urls: Vec<DetectedUrl>,
+    /// Index of the URL currently hovered with Ctrl held
+    pub(super) hovered_url_index: Option<usize>,
 }
 
 impl TerminalView {
@@ -169,6 +206,8 @@ impl TerminalView {
                     cell_height: DEFAULT_CELL_HEIGHT,
                     content_origin: (0.0, 0.0),
                     cached_content: None,
+                    detected_urls: Vec::new(),
+                    hovered_url_index: None,
                 };
                 // Capture initial terminal state so build_layout always has cached data
                 view.update_content_cache();
@@ -187,6 +226,8 @@ impl TerminalView {
                 cell_height: DEFAULT_CELL_HEIGHT,
                 content_origin: (0.0, 0.0),
                 cached_content: None,
+                detected_urls: Vec::new(),
+                hovered_url_index: None,
             },
         }
     }
@@ -267,6 +308,48 @@ impl TerminalView {
                 lines,
             });
         });
+
+        self.detect_urls_from_cache();
+    }
+
+    /// Scan cached content for URLs using regex and record their screen positions.
+    fn detect_urls_from_cache(&mut self) {
+        self.detected_urls.clear();
+
+        let Some(ref cached) = self.cached_content else {
+            return;
+        };
+
+        for (line_idx, row) in cached.cells.iter().enumerate() {
+            let line_text: String = row
+                .iter()
+                .map(|cell| if cell.c == '\0' { ' ' } else { cell.c })
+                .collect();
+
+            for mat in URL_REGEX.find_iter(&line_text) {
+                // Strip trailing punctuation that is commonly not part of URLs
+                // (e.g. "Visit https://example.com." should not include the period)
+                let url_str = mat
+                    .as_str()
+                    .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
+                if url_str.len() <= "https://".len() {
+                    continue;
+                }
+
+                // Convert byte offsets to column indices.
+                // Because the line is built char-by-char from the grid, each char
+                // maps 1:1 to a column only when all characters are single-byte.
+                // Use char_indices for correct mapping.
+                let start_col = line_text[..mat.start()].chars().count();
+                let end_col = start_col + url_str.chars().count() - 1;
+
+                self.detected_urls.push(DetectedUrl {
+                    url: url_str.to_string(),
+                    start: (line_idx, start_col),
+                    end: (line_idx, end_col),
+                });
+            }
+        }
     }
 
     /// Get the text content of the current selection
@@ -338,9 +421,38 @@ impl TerminalView {
         (line, col)
     }
 
+    /// Handle Ctrl+click to open a URL under the cursor.
+    /// Returns true if a URL was opened (so the caller can skip selection logic).
+    fn try_open_url_at(&self, screen_line: usize, col: usize) -> bool {
+        for url in &self.detected_urls {
+            if url.contains_point(screen_line, col) {
+                let _ = open::that(&url.url);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Update hovered URL index based on current mouse position and Ctrl state.
+    fn update_hovered_url(&mut self, screen_line: usize, col: usize, ctrl: bool) {
+        if ctrl {
+            self.hovered_url_index = self
+                .detected_urls
+                .iter()
+                .position(|url| url.contains_point(screen_line, col));
+        } else {
+            self.hovered_url_index = None;
+        }
+    }
+
     /// Handle mouse down event for selection
-    fn handle_mouse_down(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+    fn handle_mouse_down(&mut self, x: f32, y: f32, ctrl: bool, cx: &mut Context<Self>) {
         let (screen_line, col) = self.position_to_cell(x, y);
+
+        // Ctrl+click opens the URL under the cursor
+        if ctrl && self.try_open_url_at(screen_line as usize, col) {
+            return;
+        }
         // Convert screen coordinates to grid coordinates so selection
         // remains stable when the viewport is scrolled back
         let display_offset = self
@@ -622,6 +734,7 @@ impl TerminalView {
         let (cursor_line, cursor_col) = cached.cursor;
         let cursor_visible = cached.cursor_visible;
         let display_offset = cached.display_offset;
+        let hovered_url_index = self.hovered_url_index;
 
         // Convert cursor to display coordinates
         let display_cursor_line = cursor_line + display_offset;
@@ -672,6 +785,17 @@ impl TerminalView {
                 let is_wide_char = cached_cell.flags.contains(CellFlags::WIDE_CHAR);
                 let is_wide_spacer = cached_cell.flags.contains(CellFlags::WIDE_CHAR_SPACER);
 
+                // Check if this cell is part of a detected URL
+                let mut is_url = false;
+                let mut is_url_hovered = false;
+                for (url_idx, url) in self.detected_urls.iter().enumerate() {
+                    if url.contains_point(line_idx, col_idx) {
+                        is_url = true;
+                        is_url_hovered = hovered_url_index == Some(url_idx);
+                        break;
+                    }
+                }
+
                 row_cells.push(CellData {
                     c,
                     fg,
@@ -680,6 +804,8 @@ impl TerminalView {
                     is_selected,
                     is_wide_char,
                     is_wide_spacer,
+                    is_url,
+                    is_url_hovered,
                 });
             }
 
@@ -819,7 +945,11 @@ impl Render for TerminalView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .cursor_text()
+            .when_else(
+                self.hovered_url_index.is_some(),
+                |d: gpui::Stateful<gpui::Div>| d.cursor_pointer(),
+                |d: gpui::Stateful<gpui::Div>| d.cursor_text(),
+            )
             // Register action handlers for special keys
             .on_action(cx.listener(Self::on_enter))
             .on_action(cx.listener(Self::on_backspace))
@@ -923,14 +1053,21 @@ impl Render for TerminalView {
                     window.focus(&this.focus_handle, cx);
                     let x: f32 = event.position.x.into();
                     let y: f32 = event.position.y.into();
-                    this.handle_mouse_down(x, y, cx);
+                    let ctrl = event.modifiers.control;
+                    this.handle_mouse_down(x, y, ctrl, cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                let x: f32 = event.position.x.into();
+                let y: f32 = event.position.y.into();
                 if this.is_dragging {
-                    let x: f32 = event.position.x.into();
-                    let y: f32 = event.position.y.into();
                     this.handle_mouse_drag(x, y, cx);
+                }
+                let (screen_line, col) = this.position_to_cell(x, y);
+                let prev = this.hovered_url_index;
+                this.update_hovered_url(screen_line as usize, col, event.modifiers.control);
+                if this.hovered_url_index != prev {
+                    cx.notify();
                 }
             }))
             .on_mouse_up(

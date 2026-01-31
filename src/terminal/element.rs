@@ -7,7 +7,7 @@ use crate::theme::*;
 use gpui::{
     App, Bounds, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, Pixels, Point, SharedString, Size, TextRun,
-    TextStyle, Window, fill, px, relative, rgb,
+    TextStyle, UnderlineStyle, Window, fill, px, relative, rgb,
 };
 
 /// Padding around terminal content in pixels
@@ -48,6 +48,10 @@ pub(super) struct CellData {
     pub is_wide_char: bool,
     /// Whether this cell is a spacer for a wide character (should skip rendering)
     pub is_wide_spacer: bool,
+    /// Whether this cell is part of a detected URL
+    pub is_url: bool,
+    /// Whether this cell's URL is currently hovered with Ctrl
+    pub is_url_hovered: bool,
 }
 
 /// Cached terminal layout for paint phase
@@ -287,6 +291,10 @@ impl TerminalElement {
                 if cell.c != ' ' {
                     let fg_color = if cell.is_cursor || cell.is_selected {
                         Hsla::from(rgb(BG_BASE))
+                    } else if cell.is_url_hovered {
+                        Hsla::from(rgb(TEAL))
+                    } else if cell.is_url {
+                        Hsla::from(rgb(BLUE))
                     } else {
                         cell.fg
                     };
@@ -308,13 +316,23 @@ impl TerminalElement {
                     let mut style = text_style.clone();
                     style.color = fg_color;
 
+                    let underline = if cell.is_url {
+                        Some(UnderlineStyle {
+                            thickness: px(1.0),
+                            color: Some(fg_color),
+                            wavy: false,
+                        })
+                    } else {
+                        None
+                    };
+
                     let text: SharedString = cell.c.to_string().into();
                     let runs = [TextRun {
                         len: text.len(),
                         font: style.font(),
                         color: style.color,
                         background_color: None,
-                        underline: None,
+                        underline,
                         strikethrough: None,
                     }];
 
