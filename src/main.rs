@@ -20,8 +20,9 @@ use terminal::TerminalView;
 
 fn main() {
     Application::new().run(|app: &mut App| {
-        TerminalView::bind_keys(app);
-
+        // Global bindings must be registered BEFORE terminal bindings.
+        // GPUI resolves ties (same context depth) by LIFO, so terminal-specific
+        // bindings registered later will correctly override these when focused.
         app.bind_keys([
             KeyBinding::new("ctrl-p", ToggleParallelMode, None),
             KeyBinding::new("ctrl-tab", NextSession, None),
@@ -31,6 +32,8 @@ fn main() {
             KeyBinding::new("ctrl-r", RefreshAll, None),
             KeyBinding::new("escape", CloseFileView, None),
         ]);
+
+        TerminalView::bind_keys(app);
 
         let window = app
             .open_window(WindowOptions::default(), |_window, cx| {
