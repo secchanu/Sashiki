@@ -1,13 +1,22 @@
 //! Git operations for worktree management
+//!
+//! All git operations use the git CLI instead of libgit2 for:
+//! - Consistent behavior (remove_worktree already used CLI)
+//! - Hook support (post-checkout etc.)
+//! - Simpler build (no C library dependency)
 
-use git2::{Repository, StatusOptions};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum GitError {
-    #[error("Git error: {0}")]
-    Git(#[from] git2::Error),
+    #[error("Git command failed: {0}")]
+    Command(String),
+    #[error("Git command not found or failed to execute: {0}")]
+    Exec(#[from] std::io::Error),
+    #[error("Failed to parse git output: {0}")]
+    #[allow(dead_code)]
+    Parse(String),
 }
 
 pub type Result<T> = std::result::Result<T, GitError>;
@@ -22,124 +31,192 @@ pub struct Worktree {
     pub locked: bool,
 }
 
-/// Git repository wrapper
+/// Git config key constants for session template
+pub const CONFIG_PRE_CREATE_CMD: &str = "sashiki.template.preCreateCommand";
+pub const CONFIG_FILE_COPY: &str = "sashiki.template.fileCopy";
+pub const CONFIG_POST_CREATE_CMD: &str = "sashiki.template.postCreateCommand";
+pub const CONFIG_WORKING_DIR: &str = "sashiki.template.workingDirectory";
+
+/// Git repository wrapper using CLI commands
 pub struct GitRepo {
-    repo: Repository,
+    /// Working directory of the main worktree
+    workdir: PathBuf,
+    /// Shared .git directory (commondir equivalent)
+    git_dir: PathBuf,
+}
+
+/// Run a git command and return stdout on success
+fn run_git(workdir: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(workdir)
+        .output()
+        .map_err(GitError::Exec)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(GitError::Command(stderr));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 impl GitRepo {
     /// Open a repository at the given path
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let repo = Repository::discover(path)?;
-        Ok(Self { repo })
-    }
+        let path = path.as_ref();
 
-    /// List all worktrees
-    ///
-    /// This method correctly handles being called from either the main worktree
-    /// or a linked worktree by using commondir() to find the shared .git directory.
-    pub fn list_worktrees(&self) -> Result<Vec<Worktree>> {
-        let mut worktrees = Vec::new();
+        let workdir_str = run_git(path, &["rev-parse", "--show-toplevel"])?;
+        let workdir = PathBuf::from(workdir_str.trim());
 
-        // Use commondir() to get the shared .git directory
-        // This works correctly whether we're in the main worktree or a linked worktree
-        let common_dir = self.repo.commondir();
-        let worktrees_dir = common_dir.join("worktrees");
-
-        // Determine main worktree path
-        // For non-bare repos: commondir is .git, so parent is the main worktree
-        // For bare repos: there is no main worktree
-        let main_worktree_path = if !self.repo.is_bare() {
-            common_dir.parent().map(|p| p.to_path_buf())
+        let git_dir_str = run_git(path, &["rev-parse", "--git-common-dir"])?;
+        let git_dir_raw = PathBuf::from(git_dir_str.trim());
+        // --git-common-dir may return a relative path; resolve it
+        let git_dir = if git_dir_raw.is_relative() {
+            path.join(&git_dir_raw)
+                .canonicalize()
+                .unwrap_or_else(|_| path.join(&git_dir_raw))
         } else {
-            None
+            git_dir_raw
         };
 
-        // Add main worktree (only if this is not a bare repository)
-        if let Some(main_path) = &main_worktree_path {
-            // Get branch for main worktree from .git/HEAD
-            let branch = self.get_worktree_branch_from_head(common_dir);
+        Ok(Self { workdir, git_dir })
+    }
 
-            worktrees.push(Worktree {
-                name: main_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("main")
-                    .to_string(),
-                path: main_path.clone(),
-                branch,
-                is_main: true,
-                locked: false, // Main worktree cannot be locked
-            });
+    /// Create a GitRepo from known paths (used in async contexts)
+    pub fn from_parts(workdir: PathBuf, git_dir: PathBuf) -> Self {
+        Self { workdir, git_dir }
+    }
+
+    /// Get the main worktree working directory path
+    pub fn workdir(&self) -> &Path {
+        &self.workdir
+    }
+
+    /// Get the shared .git directory path
+    pub fn git_dir(&self) -> &Path {
+        &self.git_dir
+    }
+
+    /// List all worktrees using `git worktree list --porcelain`
+    pub fn list_worktrees(&self) -> Result<Vec<Worktree>> {
+        let output = run_git(&self.workdir, &["worktree", "list", "--porcelain"])?;
+        let mut worktrees = Vec::new();
+
+        // Parse porcelain output: blocks separated by empty lines
+        // Each block has: worktree <path>, HEAD <hash>, branch refs/heads/<name>, [locked], [bare]
+        let mut current_path: Option<PathBuf> = None;
+        let mut current_branch: Option<String> = None;
+        let mut current_locked = false;
+        let mut is_bare = false;
+
+        for line in output.lines() {
+            if line.is_empty() {
+                // End of block - flush current worktree
+                if let Some(path) = current_path.take() {
+                    let is_main = worktrees.is_empty();
+                    let name = self.worktree_name(&path, is_main);
+                    worktrees.push(Worktree {
+                        name,
+                        path,
+                        branch: current_branch.take(),
+                        is_main,
+                        locked: current_locked,
+                    });
+                    current_locked = false;
+                    is_bare = false;
+                }
+                continue;
+            }
+
+            if let Some(path_str) = line.strip_prefix("worktree ") {
+                current_path = Some(PathBuf::from(path_str));
+            } else if let Some(branch_ref) = line.strip_prefix("branch refs/heads/") {
+                current_branch = Some(branch_ref.to_string());
+            } else if line.starts_with("HEAD ") && current_branch.is_none() {
+                // Detached HEAD - use short hash
+                let hash = line.strip_prefix("HEAD ").unwrap_or("");
+                if hash.len() >= 7 {
+                    current_branch = Some(hash[..7].to_string());
+                }
+            } else if line == "bare" {
+                is_bare = true;
+            } else if line.starts_with("locked") {
+                current_locked = true;
+            }
         }
 
-        // List linked worktrees
-        if let Ok(wt_names) = self.repo.worktrees() {
-            for name in wt_names.iter().flatten() {
-                if let Ok(wt) = self.repo.find_worktree(name) {
-                    // wt.path() returns the actual worktree directory path
-                    let wt_path = wt.path().to_path_buf();
-
-                    // Get branch from .git/worktrees/<name>/HEAD
-                    let wt_git_dir = worktrees_dir.join(name);
-                    let branch = self.get_worktree_branch_from_head(&wt_git_dir);
-
-                    // Check if worktree is locked
-                    let locked = wt_git_dir.join("locked").exists();
-
-                    worktrees.push(Worktree {
-                        name: name.to_string(),
-                        path: wt_path,
-                        branch,
-                        is_main: false,
-                        locked,
-                    });
-                }
+        // Flush last block (porcelain output may not end with empty line)
+        if let Some(path) = current_path.take() {
+            if !is_bare {
+                let is_main = worktrees.is_empty();
+                let name = self.worktree_name(&path, is_main);
+                worktrees.push(Worktree {
+                    name,
+                    path,
+                    branch: current_branch.take(),
+                    is_main,
+                    locked: current_locked,
+                });
             }
         }
 
         Ok(worktrees)
     }
 
+    /// Determine worktree name
+    fn worktree_name(&self, path: &Path, is_main: bool) -> String {
+        if is_main {
+            return path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("main")
+                .to_string();
+        }
+
+        // For linked worktrees, check .git/worktrees/<name>/gitdir to find matching name
+        let worktrees_dir = self.git_dir.join("worktrees");
+        if let Ok(entries) = std::fs::read_dir(&worktrees_dir) {
+            for entry in entries.flatten() {
+                let gitdir_file = entry.path().join("gitdir");
+                if let Ok(content) = std::fs::read_to_string(&gitdir_file) {
+                    let referenced = PathBuf::from(content.trim());
+                    // gitdir contains path to the .git file in the worktree
+                    if let Some(parent) = referenced.parent() {
+                        if parent == path {
+                            if let Some(name) = entry.file_name().to_str() {
+                                return name.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: use directory name
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
     /// Create a new worktree with the specified branch.
     ///
-    /// Branch resolution order:
+    /// Branch resolution is delegated to `git worktree add`:
     /// 1. If a local branch with the name exists, use it
     /// 2. If a remote branch `origin/{branch}` exists, create local branch from it
     /// 3. Otherwise, create a new branch from HEAD
     ///
-    /// Stale worktree entries with the same name are automatically pruned.
+    /// Stale worktree entries are automatically pruned before creation.
     pub fn create_worktree(&self, name: &str, branch: &str, path: &Path) -> Result<Worktree> {
-        // Clean up stale worktree entry if it exists
-        if let Ok(existing_wt) = self.repo.find_worktree(name) {
-            // Check if prunable: working_tree=false (must be missing), valid=false (can be invalid), locked=false (must be unlocked)
-            if existing_wt.is_prunable(Some(
-                git2::WorktreePruneOptions::new()
-                    .working_tree(false)
-                    .valid(false)
-                    .locked(false),
-            ))? {
-                // Prune: working_tree=true (remove dir if exists), valid=false (allow invalid)
-                existing_wt.prune(Some(
-                    git2::WorktreePruneOptions::new()
-                        .working_tree(true)
-                        .valid(false),
-                ))?;
-            } else {
-                return Err(git2::Error::from_str(&format!(
-                    "Worktree '{}' already exists and is not prunable",
-                    name
-                ))
-                .into());
-            }
-        }
+        // Prune stale worktree entries
+        let _ = run_git(&self.workdir, &["worktree", "prune"]);
 
         // Clean up orphaned worktree directory in .git/worktrees/<name>
-        // This handles cases where find_worktree fails but directory remnants exist
-        let git_worktrees_dir = self.repo.path().join("worktrees").join(name);
+        let git_worktrees_dir = self.git_dir.join("worktrees").join(name);
         if git_worktrees_dir.exists() {
             std::fs::remove_dir_all(&git_worktrees_dir).map_err(|e| {
-                git2::Error::from_str(&format!(
+                GitError::Command(format!(
                     "Failed to remove orphaned worktree directory '{}': {}",
                     git_worktrees_dir.display(),
                     e
@@ -147,33 +224,50 @@ impl GitRepo {
             })?;
         }
 
-        // Check if a local branch with the specified name exists
-        if let Ok(local_branch) = self.repo.find_branch(branch, git2::BranchType::Local) {
-            // Local branch exists - create worktree with reference to it
-            let reference = local_branch.into_reference();
-            let mut opts = git2::WorktreeAddOptions::new();
-            opts.reference(Some(&reference));
-            self.repo.worktree(name, path, Some(&opts))?;
-        } else if let Ok(remote_ref) = self
-            .repo
-            .find_reference(&format!("refs/remotes/origin/{}", branch))
-        {
-            // Remote branch exists - create local branch from it, then create worktree
-            let commit = remote_ref.peel_to_commit()?;
-            let local_branch = self.repo.branch(branch, &commit, false)?;
-            let reference = local_branch.into_reference();
-            let mut opts = git2::WorktreeAddOptions::new();
-            opts.reference(Some(&reference));
-            self.repo.worktree(name, path, Some(&opts))?;
+        let path_str = path.to_string_lossy();
+
+        // Check if a local branch exists
+        let local_exists = run_git(
+            &self.workdir,
+            &["rev-parse", "--verify", &format!("refs/heads/{}", branch)],
+        )
+        .is_ok();
+
+        if local_exists {
+            // Local branch exists - use it directly
+            run_git(&self.workdir, &["worktree", "add", &path_str, branch])?;
         } else {
-            // No existing branch - create new branch from HEAD
-            let head = self.repo.head()?;
-            let commit = head.peel_to_commit()?;
-            let new_branch = self.repo.branch(branch, &commit, false)?;
-            let reference = new_branch.into_reference();
-            let mut opts = git2::WorktreeAddOptions::new();
-            opts.reference(Some(&reference));
-            self.repo.worktree(name, path, Some(&opts))?;
+            // Check if a remote tracking branch exists
+            let remote_exists = run_git(
+                &self.workdir,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/remotes/origin/{}", branch),
+                ],
+            )
+            .is_ok();
+
+            if remote_exists {
+                // Remote branch exists - create local tracking branch
+                run_git(
+                    &self.workdir,
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        branch,
+                        &path_str,
+                        &format!("origin/{}", branch),
+                    ],
+                )?;
+            } else {
+                // Create new branch from HEAD
+                run_git(
+                    &self.workdir,
+                    &["worktree", "add", "-b", branch, &path_str, "HEAD"],
+                )?;
+            }
         }
 
         Ok(Worktree {
@@ -185,115 +279,85 @@ impl GitRepo {
         })
     }
 
-    /// Remove a worktree using git command (more reliable than libgit2 on Windows).
+    /// Remove a worktree using git command.
     ///
     /// # Safety
     /// The `name` parameter is passed to the git command. Callers should ensure
     /// the name comes from trusted sources (e.g., our own worktree list) or has
     /// been validated with `validate_branch_name`.
     pub fn remove_worktree(&self, name: &str) -> Result<()> {
-        // Use git command directly to avoid libgit2 XDG issues on Windows
-        // Use commondir() to get the correct working directory regardless of
-        // whether we're in the main worktree or a linked worktree
-        let common_dir = self.repo.commondir();
-        let workdir = if self.repo.is_bare() {
-            common_dir.to_path_buf()
-        } else {
-            common_dir
-                .parent()
-                .map(|p| p.to_path_buf())
-                .ok_or_else(|| git2::Error::from_str("No working directory"))?
-        };
-
         let output = std::process::Command::new("git")
             .args(["worktree", "remove", "--force", name])
-            .current_dir(&workdir)
+            .current_dir(&self.workdir)
             .output()
-            .map_err(|e| git2::Error::from_str(&format!("Failed to run git command: {}", e)))?;
+            .map_err(GitError::Exec)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Ignore "not a working tree" errors
             if !stderr.contains("is not a working tree") {
-                return Err(git2::Error::from_str(&format!(
+                return Err(GitError::Command(format!(
                     "git worktree remove failed: {}",
                     stderr.trim()
-                ))
-                .into());
+                )));
             }
         }
 
         Ok(())
     }
 
-    /// Get list of changed files
+    /// Get list of changed files using `git status --porcelain=v1`
     pub fn get_changed_files(&self) -> Result<Vec<ChangedFile>> {
-        let mut opts = StatusOptions::new();
-        opts.include_untracked(true)
-            .recurse_untracked_dirs(true)
-            .include_ignored(false);
-
-        let statuses = self.repo.statuses(Some(&mut opts))?;
+        let output = run_git(&self.workdir, &["status", "--porcelain=v1"])?;
         let mut files = Vec::new();
 
-        for entry in statuses.iter() {
-            if let Some(path) = entry.path() {
-                let status = entry.status();
-                let change_type = if status.is_index_new() || status.is_wt_new() {
-                    ChangeType::Added
-                } else if status.is_index_modified() || status.is_wt_modified() {
-                    ChangeType::Modified
-                } else if status.is_index_deleted() || status.is_wt_deleted() {
-                    ChangeType::Deleted
-                } else if status.is_index_renamed() || status.is_wt_renamed() {
-                    ChangeType::Renamed
-                } else {
-                    ChangeType::Unknown
-                };
-
-                files.push(ChangedFile {
-                    path: PathBuf::from(path),
-                    change_type,
-                    staged: status.is_index_new()
-                        || status.is_index_modified()
-                        || status.is_index_deleted()
-                        || status.is_index_renamed(),
-                });
+        for line in output.lines() {
+            if line.len() < 3 {
+                continue;
             }
+
+            let index_status = line.as_bytes()[0];
+            let wt_status = line.as_bytes()[1];
+            let path_str = &line[3..];
+
+            // Handle renamed files: "old -> new"
+            let path = if let Some(arrow_pos) = path_str.find(" -> ") {
+                PathBuf::from(&path_str[arrow_pos + 4..])
+            } else {
+                PathBuf::from(path_str)
+            };
+
+            let change_type = if matches!(
+                (index_status, wt_status),
+                (b'A', _) | (_, b'A') | (b'?', b'?')
+            ) {
+                ChangeType::Added
+            } else if matches!((index_status, wt_status), (b'M', _) | (_, b'M')) {
+                ChangeType::Modified
+            } else if matches!((index_status, wt_status), (b'D', _) | (_, b'D')) {
+                ChangeType::Deleted
+            } else if matches!((index_status, wt_status), (b'R', _) | (_, b'R')) {
+                ChangeType::Renamed
+            } else {
+                ChangeType::Unknown
+            };
+
+            let staged = matches!(index_status, b'A' | b'M' | b'D' | b'R');
+
+            files.push(ChangedFile {
+                path,
+                change_type,
+                staged,
+            });
         }
 
         Ok(files)
     }
 
-    fn get_worktree_branch_from_head(&self, wt_git_path: &Path) -> Option<String> {
-        // Read HEAD file from worktree's git directory
-        let head_file = wt_git_path.join("HEAD");
-        if let Ok(content) = std::fs::read_to_string(&head_file) {
-            let content = content.trim();
-            // HEAD contains "ref: refs/heads/<branch>" or a commit hash
-            if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
-                return Some(branch.to_string());
-            }
-            // Detached HEAD - return short hash
-            if content.len() >= 7 {
-                return Some(content[..7].to_string());
-            }
-        }
-        None
-    }
-
     /// Get the worktrees directory path ({project}.worktrees/)
-    ///
-    /// Uses commondir() to correctly determine the main worktree location
-    /// regardless of whether this is called from main or linked worktree.
     pub fn worktrees_dir(&self) -> Option<PathBuf> {
-        if self.repo.is_bare() {
-            return None;
-        }
-        // commondir() returns .git, so parent is the main worktree
-        let main_worktree = self.repo.commondir().parent()?;
-        let parent = main_worktree.parent()?;
-        let repo_name = main_worktree.file_name()?.to_str()?;
+        let parent = self.workdir.parent()?;
+        let repo_name = self.workdir.file_name()?.to_str()?;
         Some(parent.join(format!("{}.worktrees", repo_name)))
     }
 
@@ -304,69 +368,32 @@ impl GitRepo {
         Some(worktrees_dir.join(safe_branch))
     }
 
-    /// Get diff for a specific file
+    /// Get diff for a specific file using `git diff HEAD`
     pub fn get_file_diff(&self, file_path: &Path) -> Result<String> {
-        let workdir = self
-            .repo
-            .workdir()
-            .ok_or_else(|| git2::Error::from_str("No working directory"))?;
+        let relative_path = file_path.strip_prefix(&self.workdir).unwrap_or(file_path);
+        let rel_str = relative_path.to_string_lossy();
 
-        // Get relative path from repo root
-        let relative_path = file_path.strip_prefix(workdir).unwrap_or(file_path);
-
-        let mut diff_opts = git2::DiffOptions::new();
-        diff_opts.pathspec(relative_path);
-
-        // Get diff between HEAD and working directory
-        let head = self.repo.head()?.peel_to_tree()?;
-        let diff = self
-            .repo
-            .diff_tree_to_workdir_with_index(Some(&head), Some(&mut diff_opts))?;
-
-        let mut diff_text = String::new();
-        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-            let prefix = match line.origin() {
-                '+' => "+",
-                '-' => "-",
-                ' ' => " ",
-                'F' => "",    // File header - no prefix needed
-                'H' => "@@ ", // Hunk header
-                _ => "",
-            };
-
-            if let Ok(content) = std::str::from_utf8(line.content()) {
-                if !prefix.is_empty() || line.origin() == 'F' {
-                    diff_text.push_str(prefix);
-                }
-                diff_text.push_str(content);
+        // Try staged + unstaged diff against HEAD
+        match run_git(&self.workdir, &["diff", "HEAD", "--", &rel_str]) {
+            Ok(diff) if !diff.is_empty() => Ok(diff),
+            _ => {
+                // Fallback: unstaged changes only (for initial commits with no HEAD)
+                run_git(&self.workdir, &["diff", "--", &rel_str]).or_else(|_| Ok(String::new()))
             }
-            true
-        })?;
-
-        Ok(diff_text)
+        }
     }
 
-    /// Get file content from HEAD (for deleted files)
+    /// Get file content from HEAD using `git show HEAD:<path>`
     pub fn get_file_content_from_head(&self, file_path: &Path) -> Result<String> {
-        let workdir = self
-            .repo
-            .workdir()
-            .ok_or_else(|| git2::Error::from_str("No working directory"))?;
-
-        let relative_path = file_path.strip_prefix(workdir).unwrap_or(file_path);
-
-        let head = self.repo.head()?.peel_to_tree()?;
-        let entry = head.get_path(relative_path)?;
-        let blob = self.repo.find_blob(entry.id())?;
-
-        String::from_utf8(blob.content().to_vec())
-            .map_err(|e| git2::Error::from_str(&format!("Invalid UTF-8 content: {}", e)).into())
+        let relative_path = file_path.strip_prefix(&self.workdir).unwrap_or(file_path);
+        let spec = format!("HEAD:{}", relative_path.to_string_lossy());
+        run_git(&self.workdir, &["show", &spec])
     }
 
     /// Generate diff for added-only file (all lines as +)
     pub fn generate_added_diff(&self, file_path: &Path) -> Result<String> {
-        let content = std::fs::read_to_string(file_path)
-            .map_err(|e| git2::Error::from_str(&e.to_string()))?;
+        let content =
+            std::fs::read_to_string(file_path).map_err(|e| GitError::Command(e.to_string()))?;
 
         let file_name = file_path
             .file_name()
@@ -414,6 +441,52 @@ impl GitRepo {
         }
 
         Ok(diff)
+    }
+
+    // --- Git config access for session templates ---
+
+    /// Read all values for a multi-valued git config key
+    pub fn get_config_values(&self, key: &str) -> Vec<String> {
+        match run_git(&self.workdir, &["config", "--get-all", key]) {
+            Ok(output) => output
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Read a single git config value
+    pub fn get_config_value(&self, key: &str) -> Option<String> {
+        run_git(&self.workdir, &["config", "--get", key])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Set all values for a multi-valued git config key (local scope)
+    pub fn set_config_values(&self, key: &str, values: &[String]) -> Result<()> {
+        // Remove all existing values first (ignore error if key doesn't exist)
+        let _ = run_git(&self.workdir, &["config", "--local", "--unset-all", key]);
+
+        // Add each value
+        for value in values {
+            run_git(&self.workdir, &["config", "--local", "--add", key, value])?;
+        }
+        Ok(())
+    }
+
+    /// Set a single git config value (local scope)
+    pub fn set_config_value(&self, key: &str, value: &str) -> Result<()> {
+        run_git(&self.workdir, &["config", "--local", key, value])?;
+        Ok(())
+    }
+
+    /// Remove a git config key (local scope)
+    pub fn remove_config_key(&self, key: &str) -> Result<()> {
+        let _ = run_git(&self.workdir, &["config", "--local", "--unset-all", key]);
+        Ok(())
     }
 }
 

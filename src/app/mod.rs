@@ -7,6 +7,7 @@ mod file_ops;
 use crate::dialog::ActiveDialog;
 use crate::git::GitRepo;
 use crate::session::SessionManager;
+use crate::template::TemplateConfig;
 use crate::terminal::TerminalView;
 use crate::ui::{FileListMode, FileTreeNode, FileView};
 use gpui::{AppContext, Context, Entity, FocusHandle};
@@ -33,6 +34,15 @@ pub struct SashikiApp {
     pub(crate) create_branch_input: String,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) create_dialog_focus: FocusHandle,
+    /// Template config being edited in the settings dialog
+    pub(crate) template_edit: Option<TemplateConfig>,
+    /// Input fields for template settings dialog (one per section, newline-delimited)
+    pub(crate) settings_inputs: [String; 4],
+    /// Cursor position (char index) per section
+    pub(crate) settings_cursors: [usize; 4],
+    /// Which section is active in settings (0=pre, 1=copy, 2=post, 3=workdir)
+    pub(crate) settings_active_section: usize,
+    pub(crate) settings_dialog_focus: FocusHandle,
 }
 
 impl SashikiApp {
@@ -58,6 +68,10 @@ impl SashikiApp {
             if let Ok(worktrees) = repo.list_worktrees() {
                 if !worktrees.is_empty() {
                     session_manager.init_from_worktrees(worktrees);
+                    let template = TemplateConfig::load(repo);
+                    session_manager.apply_terminal_default_directory_to_all(
+                        template.working_directory.as_deref(),
+                    );
                     session_manager.ensure_session_terminal(0, cx);
                     session_manager.switch_to(0);
                 } else {
@@ -92,6 +106,11 @@ impl SashikiApp {
             create_branch_input: String::new(),
             focus_handle,
             create_dialog_focus,
+            template_edit: None,
+            settings_inputs: Default::default(),
+            settings_cursors: Default::default(),
+            settings_active_section: 0,
+            settings_dialog_focus: cx.focus_handle(),
         };
 
         app.refresh_changed_files_sync();
@@ -110,5 +129,15 @@ impl SashikiApp {
                 view.write_text(text);
             });
         }
+    }
+
+    pub(crate) fn apply_template_working_directory_defaults(&mut self) {
+        let relative = self
+            .git_repo
+            .as_ref()
+            .map(TemplateConfig::load)
+            .and_then(|t| t.working_directory);
+        self.session_manager
+            .apply_terminal_default_directory_to_all(relative.as_deref());
     }
 }

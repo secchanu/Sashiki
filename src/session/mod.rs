@@ -74,6 +74,7 @@ pub struct Session {
     worktree: Worktree,
     terminals: Vec<Entity<TerminalView>>,
     active_terminal_index: usize,
+    terminal_default_directory: Option<std::path::PathBuf>,
     color: SessionColor,
     status: SessionStatus,
     /// Whether to show in parallel mode
@@ -87,6 +88,7 @@ impl Session {
             worktree,
             terminals: Vec::new(),
             active_terminal_index: 0,
+            terminal_default_directory: None,
             color: SessionColor::for_index(color_index),
             status: SessionStatus::Stopped,
             visible_in_parallel: false,
@@ -95,7 +97,19 @@ impl Session {
 
     /// Add a new terminal to this session and make it active
     pub fn add_terminal<V: 'static>(&mut self, cx: &mut Context<V>) {
-        let path = self.worktree.path.clone();
+        let path = self
+            .terminal_default_directory
+            .clone()
+            .unwrap_or_else(|| self.worktree.path.clone());
+        self.add_terminal_in_directory(path, cx);
+    }
+
+    /// Add a new terminal with a custom working directory
+    pub fn add_terminal_in_directory<V: 'static>(
+        &mut self,
+        path: std::path::PathBuf,
+        cx: &mut Context<V>,
+    ) {
         let terminal = cx.new(|cx| TerminalView::new_with_directory(path, cx));
         self.terminals.push(terminal);
         self.active_terminal_index = self.terminals.len() - 1;
@@ -204,6 +218,10 @@ impl Session {
         self.worktree.locked = updated.locked;
     }
 
+    pub fn set_terminal_default_directory(&mut self, path: Option<std::path::PathBuf>) {
+        self.terminal_default_directory = path;
+    }
+
     /// Get display name (worktree name)
     pub fn name(&self) -> &str {
         &self.worktree.name
@@ -298,6 +316,29 @@ impl SessionManager {
     /// Ensure the active session has at least one terminal
     pub fn ensure_active_session_terminal<V: 'static>(&mut self, cx: &mut Context<V>) {
         self.ensure_session_terminal(self.active_index, cx);
+    }
+
+    /// Ensure the active session has a terminal, using a custom working directory
+    pub fn ensure_active_session_terminal_in<V: 'static>(
+        &mut self,
+        directory: std::path::PathBuf,
+        cx: &mut Context<V>,
+    ) {
+        if let Some(session) = self.sessions.get_mut(self.active_index) {
+            session.set_terminal_default_directory(Some(directory.clone()));
+            if session.terminals.is_empty() {
+                session.add_terminal_in_directory(directory, cx);
+            }
+        }
+    }
+
+    pub fn apply_terminal_default_directory_to_all(&mut self, relative_path: Option<&str>) {
+        for session in &mut self.sessions {
+            let path = relative_path
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| session.worktree_path().join(s));
+            session.set_terminal_default_directory(path);
+        }
     }
 
     /// Add a new terminal to a session

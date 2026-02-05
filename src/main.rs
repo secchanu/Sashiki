@@ -7,6 +7,7 @@ mod app;
 mod dialog;
 mod git;
 mod session;
+mod template;
 mod terminal;
 mod theme;
 mod ui;

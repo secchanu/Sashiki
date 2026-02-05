@@ -12,8 +12,8 @@ gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 # Terminal emulation
 alacritty_terminal = "0.25.1"
 
-# Git operations
-git2 = "0.20.3"
+# Glob pattern matching (for session template file copy)
+glob = "0.3"
 
 # Async runtime
 smol = "2.0"

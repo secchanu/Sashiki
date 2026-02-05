@@ -219,6 +219,9 @@ impl SashikiApp {
             .border_color(rgb(BG_SURFACE0))
             .px_3()
             .py_2()
+            .flex()
+            .flex_col()
+            .gap_1()
             .child(
                 div()
                     .id("create-worktree-btn")
@@ -236,6 +239,23 @@ impl SashikiApp {
                         this.open_create_dialog(window, cx);
                     }))
                     .child("+ Create Worktree"),
+            )
+            .child(
+                div()
+                    .id("template-settings-btn")
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .cursor_pointer()
+                    .rounded_sm()
+                    .hover(|el| el.bg(rgb(BG_SURFACE1)))
+                    .text_center()
+                    .text_xs()
+                    .text_color(rgb(TEXT_MUTED))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_template_settings(window, cx);
+                    }))
+                    .child("Template Settings"),
             )
     }
 }
