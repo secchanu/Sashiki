@@ -96,6 +96,15 @@ impl Session {
     /// Add a new terminal to this session and make it active
     pub fn add_terminal<V: 'static>(&mut self, cx: &mut Context<V>) {
         let path = self.worktree.path.clone();
+        self.add_terminal_in_directory(path, cx);
+    }
+
+    /// Add a new terminal with a custom working directory
+    pub fn add_terminal_in_directory<V: 'static>(
+        &mut self,
+        path: std::path::PathBuf,
+        cx: &mut Context<V>,
+    ) {
         let terminal = cx.new(|cx| TerminalView::new_with_directory(path, cx));
         self.terminals.push(terminal);
         self.active_terminal_index = self.terminals.len() - 1;
@@ -298,6 +307,19 @@ impl SessionManager {
     /// Ensure the active session has at least one terminal
     pub fn ensure_active_session_terminal<V: 'static>(&mut self, cx: &mut Context<V>) {
         self.ensure_session_terminal(self.active_index, cx);
+    }
+
+    /// Ensure the active session has a terminal, using a custom working directory
+    pub fn ensure_active_session_terminal_in<V: 'static>(
+        &mut self,
+        directory: std::path::PathBuf,
+        cx: &mut Context<V>,
+    ) {
+        if let Some(session) = self.sessions.get_mut(self.active_index) {
+            if session.terminals.is_empty() {
+                session.add_terminal_in_directory(directory, cx);
+            }
+        }
     }
 
     /// Add a new terminal to a session

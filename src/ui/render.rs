@@ -51,6 +51,23 @@ impl Render for SashikiApp {
             )
             .when_some(
                 match &self.active_dialog {
+                    ActiveDialog::Creating {
+                        branch,
+                        steps,
+                        current_step,
+                    } => Some((branch.as_str(), steps.as_slice(), *current_step)),
+                    _ => None,
+                },
+                |this, (branch, steps, current_step)| {
+                    this.child(self.render_creating_dialog(branch, steps, current_step))
+                },
+            )
+            .when(
+                matches!(self.active_dialog, ActiveDialog::TemplateSettings),
+                |this| this.child(self.render_template_settings_dialog(cx)),
+            )
+            .when_some(
+                match &self.active_dialog {
                     ActiveDialog::Error { message } => Some(message.as_str()),
                     _ => None,
                 },

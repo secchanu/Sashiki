@@ -7,6 +7,7 @@ mod file_ops;
 use crate::dialog::ActiveDialog;
 use crate::git::GitRepo;
 use crate::session::SessionManager;
+use crate::template::TemplateConfig;
 use crate::terminal::TerminalView;
 use crate::ui::{FileListMode, FileTreeNode, FileView};
 use gpui::{AppContext, Context, Entity, FocusHandle};
@@ -33,6 +34,13 @@ pub struct SashikiApp {
     pub(crate) create_branch_input: String,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) create_dialog_focus: FocusHandle,
+    /// Template config being edited in the settings dialog
+    pub(crate) template_edit: Option<TemplateConfig>,
+    /// Input field for template settings dialog
+    pub(crate) settings_input: String,
+    /// Which section is active in settings (0=pre, 1=copy, 2=post, 3=workdir)
+    pub(crate) settings_active_section: usize,
+    pub(crate) settings_dialog_focus: FocusHandle,
 }
 
 impl SashikiApp {
@@ -92,6 +100,10 @@ impl SashikiApp {
             create_branch_input: String::new(),
             focus_handle,
             create_dialog_focus,
+            template_edit: None,
+            settings_input: String::new(),
+            settings_active_section: 0,
+            settings_dialog_focus: cx.focus_handle(),
         };
 
         app.refresh_changed_files_sync();
