@@ -441,28 +441,70 @@ impl SashikiApp {
 
     // === Template settings ===
 
-    pub fn open_template_settings(&mut self, cx: &mut Context<Self>) {
+    pub fn open_template_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let template = self
             .git_repo
             .as_ref()
             .map(TemplateConfig::load)
             .unwrap_or_default();
+        self.settings_inputs = [
+            template.pre_create_commands.join("\n"),
+            template.file_copies.join("\n"),
+            template.post_create_commands.join("\n"),
+            template
+                .working_directory
+                .clone()
+                .unwrap_or_default(),
+        ];
+        self.settings_cursors = [
+            self.settings_inputs[0].chars().count(),
+            self.settings_inputs[1].chars().count(),
+            self.settings_inputs[2].chars().count(),
+            self.settings_inputs[3].chars().count(),
+        ];
         self.template_edit = Some(template);
-        self.settings_input.clear();
         self.settings_active_section = 0;
         self.active_dialog = ActiveDialog::TemplateSettings;
         cx.notify();
+        // Focus on the next frame so track_focus has registered the handle
+        // in the dispatch tree during the render pass
+        cx.on_next_frame(window, |this, window, cx| {
+            window.focus(&this.settings_dialog_focus, cx);
+            cx.notify();
+        });
     }
 
-    pub fn close_template_settings(&mut self, cx: &mut Context<Self>) {
+    pub fn close_template_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.template_edit = None;
-        self.settings_input.clear();
+        self.settings_inputs = Default::default();
+        self.settings_cursors = Default::default();
         self.active_dialog = ActiveDialog::None;
+        if let Some(terminal) = self.active_terminal() {
+            let focus = terminal.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
         cx.notify();
     }
 
-    pub fn save_template_settings(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref template) = self.template_edit {
+    pub fn save_template_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let parse_lines = |s: &str| -> Vec<String> {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        };
+
+        if let Some(ref mut template) = self.template_edit {
+            template.pre_create_commands = parse_lines(&self.settings_inputs[0]);
+            template.file_copies = parse_lines(&self.settings_inputs[1]);
+            template.post_create_commands = parse_lines(&self.settings_inputs[2]);
+            let workdir = self.settings_inputs[3].trim().to_string();
+            template.working_directory = if workdir.is_empty() {
+                None
+            } else {
+                Some(workdir)
+            };
+
             if let Some(ref repo) = self.git_repo {
                 if let Err(e) = template.save(repo) {
                     self.active_dialog = ActiveDialog::Error {
@@ -476,49 +518,14 @@ impl SashikiApp {
         }
 
         self.template_edit = None;
-        self.settings_input.clear();
+        self.settings_inputs = Default::default();
+        self.settings_cursors = Default::default();
         self.active_dialog = ActiveDialog::None;
-        cx.notify();
-    }
-
-    pub fn add_template_item(&mut self, cx: &mut Context<Self>) {
-        let value = self.settings_input.trim().to_string();
-        if value.is_empty() {
-            return;
-        }
-
-        if let Some(ref mut template) = self.template_edit {
-            match self.settings_active_section {
-                0 => template.pre_create_commands.push(value),
-                1 => template.file_copies.push(value),
-                2 => template.post_create_commands.push(value),
-                3 => template.working_directory = Some(value),
-                _ => {}
-            }
-        }
-
-        self.settings_input.clear();
-        cx.notify();
-    }
-
-    pub fn remove_template_item(&mut self, section: usize, index: usize, cx: &mut Context<Self>) {
-        if let Some(ref mut template) = self.template_edit {
-            match section {
-                0 if index < template.pre_create_commands.len() => {
-                    template.pre_create_commands.remove(index);
-                }
-                1 if index < template.file_copies.len() => {
-                    template.file_copies.remove(index);
-                }
-                2 if index < template.post_create_commands.len() => {
-                    template.post_create_commands.remove(index);
-                }
-                3 => {
-                    template.working_directory = None;
-                }
-                _ => {}
-            }
+        if let Some(terminal) = self.active_terminal() {
+            let focus = terminal.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
         }
         cx.notify();
     }
+
 }

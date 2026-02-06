@@ -252,8 +252,8 @@ impl SashikiApp {
                     .text_center()
                     .text_xs()
                     .text_color(rgb(TEXT_MUTED))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_template_settings(cx);
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_template_settings(window, cx);
                     }))
                     .child("Template Settings"),
             )

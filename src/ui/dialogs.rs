@@ -490,33 +490,105 @@ impl SashikiApp {
     }
 
     pub fn render_template_settings_dialog(&self, cx: &Context<Self>) -> AnyElement {
-        let template = self.template_edit.clone().unwrap_or_default();
-        let input_value = self.settings_input.clone();
         let active_section = self.settings_active_section;
+        let inputs: Vec<String> = self.settings_inputs.iter().cloned().collect();
+        let cursors = self.settings_cursors;
 
         div()
             .id("template-settings-container")
             .track_focus(&self.settings_dialog_focus)
             .absolute()
             .inset_0()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke.key;
+                let sec = this.settings_active_section;
+
                 if key == "escape" {
-                    this.close_template_settings(cx);
-                } else if key == "enter" {
-                    this.add_template_item(cx);
+                    this.close_template_settings(window, cx);
+                } else if event.keystroke.modifiers.control && key == "s" {
+                    this.save_template_settings(window, cx);
                 } else if key == "tab" {
-                    this.settings_active_section =
-                        (this.settings_active_section + 1) % 4;
-                    this.settings_input.clear();
+                    if event.keystroke.modifiers.shift {
+                        this.settings_active_section = if sec == 0 { 3 } else { sec - 1 };
+                    } else {
+                        this.settings_active_section = (sec + 1) % 4;
+                    }
+                    cx.notify();
+                } else if key == "enter" {
+                    let cursor = this.settings_cursors[sec];
+                    let byte_pos = char_to_byte_offset(&this.settings_inputs[sec], cursor);
+                    this.settings_inputs[sec].insert(byte_pos, '\n');
+                    this.settings_cursors[sec] = cursor + 1;
                     cx.notify();
                 } else if key == "backspace" {
-                    this.settings_input.pop();
+                    let cursor = this.settings_cursors[sec];
+                    if cursor > 0 {
+                        let byte_pos =
+                            char_to_byte_offset(&this.settings_inputs[sec], cursor - 1);
+                        this.settings_inputs[sec].remove(byte_pos);
+                        this.settings_cursors[sec] = cursor - 1;
+                    }
+                    cx.notify();
+                } else if key == "delete" {
+                    let cursor = this.settings_cursors[sec];
+                    let char_count = this.settings_inputs[sec].chars().count();
+                    if cursor < char_count {
+                        let byte_pos =
+                            char_to_byte_offset(&this.settings_inputs[sec], cursor);
+                        this.settings_inputs[sec].remove(byte_pos);
+                    }
+                    cx.notify();
+                } else if key == "left" {
+                    this.settings_cursors[sec] =
+                        this.settings_cursors[sec].saturating_sub(1);
+                    cx.notify();
+                } else if key == "right" {
+                    let char_count = this.settings_inputs[sec].chars().count();
+                    let cursor = this.settings_cursors[sec];
+                    this.settings_cursors[sec] = (cursor + 1).min(char_count);
+                    cx.notify();
+                } else if key == "up" {
+                    let cursor = this.settings_cursors[sec];
+                    let text = &this.settings_inputs[sec];
+                    let (line, col) = cursor_to_line_col(text, cursor);
+                    if line > 0 {
+                        this.settings_cursors[sec] =
+                            line_col_to_cursor(text, line - 1, col);
+                    }
+                    cx.notify();
+                } else if key == "down" {
+                    let cursor = this.settings_cursors[sec];
+                    let text = &this.settings_inputs[sec];
+                    let (line, col) = cursor_to_line_col(text, cursor);
+                    let new_cursor = line_col_to_cursor(text, line + 1, col);
+                    this.settings_cursors[sec] = new_cursor;
+                    cx.notify();
+                } else if key == "home" {
+                    let cursor = this.settings_cursors[sec];
+                    let text = &this.settings_inputs[sec];
+                    let (line, _) = cursor_to_line_col(text, cursor);
+                    this.settings_cursors[sec] = line_col_to_cursor(text, line, 0);
+                    cx.notify();
+                } else if key == "end" {
+                    let cursor = this.settings_cursors[sec];
+                    let text = &this.settings_inputs[sec];
+                    let (line, _) = cursor_to_line_col(text, cursor);
+                    this.settings_cursors[sec] =
+                        line_col_to_cursor(text, line, usize::MAX);
+                    cx.notify();
+                } else if key == "space" {
+                    let cursor = this.settings_cursors[sec];
+                    let byte_pos = char_to_byte_offset(&this.settings_inputs[sec], cursor);
+                    this.settings_inputs[sec].insert(byte_pos, ' ');
+                    this.settings_cursors[sec] = cursor + 1;
                     cx.notify();
                 } else if let Some(c) = key.chars().next()
                     && key.chars().count() == 1
                 {
-                    this.settings_input.push(c);
+                    let cursor = this.settings_cursors[sec];
+                    let byte_pos = char_to_byte_offset(&this.settings_inputs[sec], cursor);
+                    this.settings_inputs[sec].insert(byte_pos, c);
+                    this.settings_cursors[sec] = cursor + 1;
                     cx.notify();
                 }
             }))
@@ -528,8 +600,8 @@ impl SashikiApp {
                     .bg(rgba(OVERLAY))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.close_template_settings(cx);
+                        cx.listener(|this, _, window, cx| {
+                            this.close_template_settings(window, cx);
                         }),
                     ),
             )
@@ -567,39 +639,45 @@ impl SashikiApp {
                                     .p_4()
                                     .flex()
                                     .flex_col()
-                                    .gap_4()
-                                    .child(Self::render_template_section(
+                                    .gap_3()
+                                    .child(Self::render_textarea_section(
                                         "Pre-create Commands",
-                                        &template.pre_create_commands,
                                         "e.g. git pull --ff-only",
+                                        &inputs[0],
+                                        cursors[0],
                                         0,
                                         active_section,
-                                        &input_value,
+                                        true,
                                         cx,
                                     ))
-                                    .child(Self::render_template_section(
+                                    .child(Self::render_textarea_section(
                                         "Files to Copy (glob)",
-                                        &template.file_copies,
                                         "e.g. .env",
+                                        &inputs[1],
+                                        cursors[1],
                                         1,
                                         active_section,
-                                        &input_value,
+                                        true,
                                         cx,
                                     ))
-                                    .child(Self::render_template_section(
+                                    .child(Self::render_textarea_section(
                                         "Post-create Commands",
-                                        &template.post_create_commands,
                                         "e.g. npm install",
+                                        &inputs[2],
+                                        cursors[2],
                                         2,
                                         active_section,
-                                        &input_value,
+                                        true,
                                         cx,
                                     ))
-                                    .child(Self::render_workdir_section(
-                                        &template.working_directory,
+                                    .child(Self::render_textarea_section(
+                                        "Working Directory",
+                                        "e.g. packages/frontend",
+                                        &inputs[3],
+                                        cursors[3],
                                         3,
                                         active_section,
-                                        &input_value,
+                                        false,
                                         cx,
                                     )),
                             )
@@ -616,7 +694,7 @@ impl SashikiApp {
                                         div()
                                             .text_color(rgb(TEXT_MUTED))
                                             .text_xs()
-                                            .child("Tab: switch section"),
+                                            .child("Tab: switch section / Ctrl+S: save"),
                                     )
                                     .child(
                                         div()
@@ -634,8 +712,8 @@ impl SashikiApp {
                                                     .text_xs()
                                                     .text_color(rgb(TEXT))
                                                     .on_click(cx.listener(
-                                                        |this, _, _, cx| {
-                                                            this.close_template_settings(cx);
+                                                        |this, _, window, cx| {
+                                                            this.close_template_settings(window, cx);
                                                         },
                                                     ))
                                                     .child("Cancel"),
@@ -652,8 +730,8 @@ impl SashikiApp {
                                                     .text_xs()
                                                     .text_color(rgb(BG_BASE))
                                                     .on_click(cx.listener(
-                                                        |this, _, _, cx| {
-                                                            this.save_template_settings(cx);
+                                                        |this, _, window, cx| {
+                                                            this.save_template_settings(window, cx);
                                                         },
                                                     ))
                                                     .child("Save"),
@@ -665,21 +743,93 @@ impl SashikiApp {
             .into_any_element()
     }
 
-    fn render_template_section(
+    fn render_textarea_section(
         title: &str,
-        items: &[String],
         placeholder: &str,
+        content: &str,
+        cursor: usize,
         section_index: usize,
         active_section: usize,
-        input_value: &str,
+        multiline: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let is_active = section_index == active_section;
         let title = title.to_string();
-        let placeholder = placeholder.to_string();
-        let input_value = input_value.to_string();
+        let is_empty = content.is_empty();
+        let sec = section_index;
+        let cursor = cursor.min(content.chars().count());
 
-        let mut section = div()
+        let min_height = if multiline {
+            gpui::px(72.)
+        } else {
+            gpui::px(26.)
+        };
+
+        let mut textarea = div()
+            .id(("textarea-section", section_index))
+            .w_full()
+            .min_h(min_height)
+            .px_2()
+            .py_1()
+            .bg(rgb(BG_SURFACE0))
+            .border_1()
+            .border_color(if is_active {
+                rgb(BLUE)
+            } else {
+                rgb(BG_SURFACE1)
+            })
+            .rounded_sm()
+            .cursor_text()
+            .flex()
+            .flex_col()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.settings_active_section = sec;
+                cx.notify();
+            }));
+
+        if is_empty {
+            if is_active {
+                textarea = textarea.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(format!("|{}", placeholder)),
+                );
+            } else {
+                textarea = textarea.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(placeholder.to_string()),
+                );
+            }
+        } else {
+            let lines: Vec<&str> = content.split('\n').collect();
+            let (cursor_line, cursor_col) = cursor_to_line_col(content, cursor);
+
+            for (line_idx, line) in lines.iter().enumerate() {
+                let display = if is_active && line_idx == cursor_line {
+                    let col = cursor_col.min(line.chars().count());
+                    let byte_pos = line
+                        .char_indices()
+                        .nth(col)
+                        .map(|(i, _)| i)
+                        .unwrap_or(line.len());
+                    let (before, after) = line.split_at(byte_pos);
+                    format!("{}|{}", before, after)
+                } else if line.is_empty() {
+                    " ".to_string()
+                } else {
+                    line.to_string()
+                };
+
+                textarea = textarea.child(
+                    div().text_xs().text_color(rgb(TEXT)).child(display),
+                );
+            }
+        }
+
+        div()
             .flex()
             .flex_col()
             .gap_1()
@@ -693,175 +843,60 @@ impl SashikiApp {
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     .child(title),
-            );
-
-        // Existing items
-        for (i, item) in items.iter().enumerate() {
-            let item_text = item.clone();
-            let remove_idx = i;
-            let sec = section_index;
-            section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_2()
-                    .py_1()
-                    .bg(rgb(BG_SURFACE0))
-                    .rounded_sm()
-                    .child(
-                        div()
-                            .text_color(rgb(TEXT))
-                            .text_xs()
-                            .child(item_text),
-                    )
-                    .child(
-                        div()
-                            .id(("remove-item", section_index * 100 + i))
-                            .px_1()
-                            .cursor_pointer()
-                            .text_color(rgb(TEXT_MUTED))
-                            .hover(|el| el.text_color(rgb(RED)))
-                            .text_xs()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.remove_template_item(sec, remove_idx, cx);
-                            }))
-                            .child("x"),
-                    ),
-            );
-        }
-
-        // Input field (only shown for active section)
-        if is_active {
-            section = section.child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex_1()
-                            .px_2()
-                            .py_1()
-                            .bg(rgb(BG_SURFACE0))
-                            .border_1()
-                            .border_color(rgb(BLUE))
-                            .rounded_sm()
-                            .text_xs()
-                            .text_color(if input_value.is_empty() {
-                                rgb(TEXT_MUTED)
-                            } else {
-                                rgb(TEXT)
-                            })
-                            .child(if input_value.is_empty() {
-                                placeholder
-                            } else {
-                                input_value
-                            }),
-                    ),
-            );
-        }
-
-        section
+            )
+            .child(textarea)
     }
+}
 
-    fn render_workdir_section(
-        working_directory: &Option<String>,
-        section_index: usize,
-        active_section: usize,
-        input_value: &str,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        let is_active = section_index == active_section;
-        let current_value = working_directory.clone().unwrap_or_default();
-        let input_value = input_value.to_string();
-        let input_is_empty = input_value.is_empty();
-
-        let mut section = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .text_color(if is_active {
-                        rgb(BLUE)
-                    } else {
-                        rgb(TEXT_SECONDARY)
-                    })
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child("Working Directory"),
-            );
-
-        if !is_active {
-            // Show current value
-            if !current_value.is_empty() {
-                section = section.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px_2()
-                        .py_1()
-                        .bg(rgb(BG_SURFACE0))
-                        .rounded_sm()
-                        .child(div().text_color(rgb(TEXT)).text_xs().child(current_value.clone()))
-                        .child(
-                            div()
-                                .id("clear-workdir")
-                                .px_1()
-                                .cursor_pointer()
-                                .text_color(rgb(TEXT_MUTED))
-                                .hover(|el| el.text_color(rgb(RED)))
-                                .text_xs()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(ref mut config) = this.template_edit {
-                                        config.working_directory = None;
-                                    }
-                                    cx.notify();
-                                }))
-                                .child("x"),
-                        ),
-                );
-            } else {
-                section = section.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_color(rgb(TEXT_MUTED))
-                        .text_xs()
-                        .child(". (worktree root)"),
-                );
-            }
+/// Get (line, col) from a char-based cursor position in text.
+fn cursor_to_line_col(text: &str, cursor: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut col = 0;
+    for (i, c) in text.chars().enumerate() {
+        if i == cursor {
+            return (line, col);
+        }
+        if c == '\n' {
+            line += 1;
+            col = 0;
         } else {
-            // Editable input
-            let display = if input_is_empty {
-                if current_value.is_empty() {
-                    "e.g. packages/frontend".to_string()
-                } else {
-                    current_value
-                }
-            } else {
-                input_value
-            };
-
-            section = section.child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .bg(rgb(BG_SURFACE0))
-                    .border_1()
-                    .border_color(rgb(BLUE))
-                    .rounded_sm()
-                    .text_xs()
-                    .text_color(if input_is_empty {
-                        rgb(TEXT_MUTED)
-                    } else {
-                        rgb(TEXT)
-                    })
-                    .child(display),
-            );
+            col += 1;
         }
-
-        section
     }
+    (line, col)
+}
+
+/// Get char-based cursor position from (line, col).
+/// Clamps col to the end of the target line if it exceeds the line length.
+fn line_col_to_cursor(text: &str, target_line: usize, target_col: usize) -> usize {
+    let mut line = 0;
+    let mut col = 0;
+    for (i, c) in text.chars().enumerate() {
+        if line == target_line && col == target_col {
+            return i;
+        }
+        if c == '\n' {
+            if line == target_line {
+                return i;
+            }
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    if line == target_line {
+        text.chars().count()
+    } else {
+        // target_line is beyond last line, clamp to end of text
+        text.chars().count()
+    }
+}
+
+/// Convert a char offset to a byte offset in a string.
+fn char_to_byte_offset(text: &str, char_offset: usize) -> usize {
+    text.char_indices()
+        .nth(char_offset)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len())
 }

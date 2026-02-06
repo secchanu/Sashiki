@@ -36,8 +36,10 @@ pub struct SashikiApp {
     pub(crate) create_dialog_focus: FocusHandle,
     /// Template config being edited in the settings dialog
     pub(crate) template_edit: Option<TemplateConfig>,
-    /// Input field for template settings dialog
-    pub(crate) settings_input: String,
+    /// Input fields for template settings dialog (one per section, newline-delimited)
+    pub(crate) settings_inputs: [String; 4],
+    /// Cursor position (char index) per section
+    pub(crate) settings_cursors: [usize; 4],
     /// Which section is active in settings (0=pre, 1=copy, 2=post, 3=workdir)
     pub(crate) settings_active_section: usize,
     pub(crate) settings_dialog_focus: FocusHandle,
@@ -101,7 +103,8 @@ impl SashikiApp {
             focus_handle,
             create_dialog_focus,
             template_edit: None,
-            settings_input: String::new(),
+            settings_inputs: Default::default(),
+            settings_cursors: Default::default(),
             settings_active_section: 0,
             settings_dialog_focus: cx.focus_handle(),
         };
