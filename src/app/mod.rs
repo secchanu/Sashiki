@@ -68,6 +68,10 @@ impl SashikiApp {
             if let Ok(worktrees) = repo.list_worktrees() {
                 if !worktrees.is_empty() {
                     session_manager.init_from_worktrees(worktrees);
+                    let template = TemplateConfig::load(repo);
+                    session_manager.apply_terminal_default_directory_to_all(
+                        template.working_directory.as_deref(),
+                    );
                     session_manager.ensure_session_terminal(0, cx);
                     session_manager.switch_to(0);
                 } else {
@@ -125,5 +129,15 @@ impl SashikiApp {
                 view.write_text(text);
             });
         }
+    }
+
+    pub(crate) fn apply_template_working_directory_defaults(&mut self) {
+        let relative = self
+            .git_repo
+            .as_ref()
+            .map(TemplateConfig::load)
+            .and_then(|t| t.working_directory);
+        self.session_manager
+            .apply_terminal_default_directory_to_all(relative.as_deref());
     }
 }

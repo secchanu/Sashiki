@@ -2,7 +2,7 @@
 
 use super::SashikiApp;
 use crate::dialog::ActiveDialog;
-use crate::git::{validate_branch_name, GitRepo};
+use crate::git::{GitRepo, validate_branch_name};
 use crate::template::{self, TemplateConfig};
 use gpui::{Context, Focusable, Window};
 use std::path::{Path, PathBuf};
@@ -196,10 +196,7 @@ impl SashikiApp {
             let copy_results = smol::unblock(move || tmpl.copy_files(&src, &dst)).await;
 
             // Check for errors
-            let errors: Vec<_> = copy_results
-                .iter()
-                .filter(|r| !r.success)
-                .collect();
+            let errors: Vec<_> = copy_results.iter().filter(|r| !r.success).collect();
 
             if !errors.is_empty() {
                 let msg = errors
@@ -451,10 +448,7 @@ impl SashikiApp {
             template.pre_create_commands.join("\n"),
             template.file_copies.join("\n"),
             template.post_create_commands.join("\n"),
-            template
-                .working_directory
-                .clone()
-                .unwrap_or_default(),
+            template.working_directory.clone().unwrap_or_default(),
         ];
         self.settings_cursors = [
             self.settings_inputs[0].chars().count(),
@@ -517,6 +511,8 @@ impl SashikiApp {
             }
         }
 
+        self.apply_template_working_directory_defaults();
+
         self.template_edit = None;
         self.settings_inputs = Default::default();
         self.settings_cursors = Default::default();
@@ -527,5 +523,4 @@ impl SashikiApp {
         }
         cx.notify();
     }
-
 }

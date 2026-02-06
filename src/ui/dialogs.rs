@@ -515,6 +515,10 @@ impl SashikiApp {
                     }
                     cx.notify();
                 } else if key == "enter" {
+                    if sec == 3 {
+                        this.save_template_settings(window, cx);
+                        return;
+                    }
                     let cursor = this.settings_cursors[sec];
                     let byte_pos = char_to_byte_offset(&this.settings_inputs[sec], cursor);
                     this.settings_inputs[sec].insert(byte_pos, '\n');
@@ -523,8 +527,7 @@ impl SashikiApp {
                 } else if key == "backspace" {
                     let cursor = this.settings_cursors[sec];
                     if cursor > 0 {
-                        let byte_pos =
-                            char_to_byte_offset(&this.settings_inputs[sec], cursor - 1);
+                        let byte_pos = char_to_byte_offset(&this.settings_inputs[sec], cursor - 1);
                         this.settings_inputs[sec].remove(byte_pos);
                         this.settings_cursors[sec] = cursor - 1;
                     }
@@ -533,14 +536,12 @@ impl SashikiApp {
                     let cursor = this.settings_cursors[sec];
                     let char_count = this.settings_inputs[sec].chars().count();
                     if cursor < char_count {
-                        let byte_pos =
-                            char_to_byte_offset(&this.settings_inputs[sec], cursor);
+                        let byte_pos = char_to_byte_offset(&this.settings_inputs[sec], cursor);
                         this.settings_inputs[sec].remove(byte_pos);
                     }
                     cx.notify();
                 } else if key == "left" {
-                    this.settings_cursors[sec] =
-                        this.settings_cursors[sec].saturating_sub(1);
+                    this.settings_cursors[sec] = this.settings_cursors[sec].saturating_sub(1);
                     cx.notify();
                 } else if key == "right" {
                     let char_count = this.settings_inputs[sec].chars().count();
@@ -552,8 +553,7 @@ impl SashikiApp {
                     let text = &this.settings_inputs[sec];
                     let (line, col) = cursor_to_line_col(text, cursor);
                     if line > 0 {
-                        this.settings_cursors[sec] =
-                            line_col_to_cursor(text, line - 1, col);
+                        this.settings_cursors[sec] = line_col_to_cursor(text, line - 1, col);
                     }
                     cx.notify();
                 } else if key == "down" {
@@ -573,8 +573,7 @@ impl SashikiApp {
                     let cursor = this.settings_cursors[sec];
                     let text = &this.settings_inputs[sec];
                     let (line, _) = cursor_to_line_col(text, cursor);
-                    this.settings_cursors[sec] =
-                        line_col_to_cursor(text, line, usize::MAX);
+                    this.settings_cursors[sec] = line_col_to_cursor(text, line, usize::MAX);
                     cx.notify();
                 } else if key == "space" {
                     let cursor = this.settings_cursors[sec];
@@ -640,6 +639,9 @@ impl SashikiApp {
                                     .flex()
                                     .flex_col()
                                     .gap_3()
+                                    .child(Self::render_template_group_header(
+                                        "Create-time Actions",
+                                    ))
                                     .child(Self::render_textarea_section(
                                         "Pre-create Commands",
                                         "e.g. git pull --ff-only",
@@ -670,16 +672,32 @@ impl SashikiApp {
                                         true,
                                         cx,
                                     ))
+                                    .child(
+                                        div()
+                                            .mt_2()
+                                            .pt_3()
+                                            .border_t_1()
+                                            .border_color(rgb(BG_SURFACE0))
+                                            .child(Self::render_template_group_header(
+                                                "Session Defaults",
+                                            )),
+                                    )
                                     .child(Self::render_textarea_section(
-                                        "Working Directory",
-                                        "e.g. packages/frontend",
+                                        "Default Working Directory",
+                                        ".",
                                         &inputs[3],
                                         cursors[3],
                                         3,
                                         active_section,
                                         false,
                                         cx,
-                                    )),
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(TEXT_MUTED))
+                                            .text_xs()
+                                            .child("Relative path from worktree root."),
+                                    ),
                             )
                             // Footer
                             .child(
@@ -689,13 +707,7 @@ impl SashikiApp {
                                     .border_t_1()
                                     .border_color(rgb(BG_SURFACE0))
                                     .flex()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .text_color(rgb(TEXT_MUTED))
-                                            .text_xs()
-                                            .child("Tab: switch section / Ctrl+S: save"),
-                                    )
+                                    .justify_end()
                                     .child(
                                         div()
                                             .flex()
@@ -711,11 +723,9 @@ impl SashikiApp {
                                                     .hover(|el| el.bg(rgb(BG_SURFACE2)))
                                                     .text_xs()
                                                     .text_color(rgb(TEXT))
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.close_template_settings(window, cx);
-                                                        },
-                                                    ))
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.close_template_settings(window, cx);
+                                                    }))
                                                     .child("Cancel"),
                                             )
                                             .child(
@@ -729,11 +739,9 @@ impl SashikiApp {
                                                     .hover(|el| el.bg(rgb(TEAL)))
                                                     .text_xs()
                                                     .text_color(rgb(BG_BASE))
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.save_template_settings(window, cx);
-                                                        },
-                                                    ))
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.save_template_settings(window, cx);
+                                                    }))
                                                     .child("Save"),
                                             ),
                                     ),
@@ -823,9 +831,7 @@ impl SashikiApp {
                     line.to_string()
                 };
 
-                textarea = textarea.child(
-                    div().text_xs().text_color(rgb(TEXT)).child(display),
-                );
+                textarea = textarea.child(div().text_xs().text_color(rgb(TEXT)).child(display));
             }
         }
 
@@ -845,6 +851,16 @@ impl SashikiApp {
                     .child(title),
             )
             .child(textarea)
+    }
+
+    fn render_template_group_header(title: &str) -> impl IntoElement {
+        div().flex().items_center().child(
+            div()
+                .text_color(rgb(TEXT_SECONDARY))
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .child(title.to_string()),
+        )
     }
 }
 

@@ -370,9 +370,7 @@ impl GitRepo {
 
     /// Get diff for a specific file using `git diff HEAD`
     pub fn get_file_diff(&self, file_path: &Path) -> Result<String> {
-        let relative_path = file_path
-            .strip_prefix(&self.workdir)
-            .unwrap_or(file_path);
+        let relative_path = file_path.strip_prefix(&self.workdir).unwrap_or(file_path);
         let rel_str = relative_path.to_string_lossy();
 
         // Try staged + unstaged diff against HEAD
@@ -380,25 +378,22 @@ impl GitRepo {
             Ok(diff) if !diff.is_empty() => Ok(diff),
             _ => {
                 // Fallback: unstaged changes only (for initial commits with no HEAD)
-                run_git(&self.workdir, &["diff", "--", &rel_str])
-                    .or_else(|_| Ok(String::new()))
+                run_git(&self.workdir, &["diff", "--", &rel_str]).or_else(|_| Ok(String::new()))
             }
         }
     }
 
     /// Get file content from HEAD using `git show HEAD:<path>`
     pub fn get_file_content_from_head(&self, file_path: &Path) -> Result<String> {
-        let relative_path = file_path
-            .strip_prefix(&self.workdir)
-            .unwrap_or(file_path);
+        let relative_path = file_path.strip_prefix(&self.workdir).unwrap_or(file_path);
         let spec = format!("HEAD:{}", relative_path.to_string_lossy());
         run_git(&self.workdir, &["show", &spec])
     }
 
     /// Generate diff for added-only file (all lines as +)
     pub fn generate_added_diff(&self, file_path: &Path) -> Result<String> {
-        let content = std::fs::read_to_string(file_path)
-            .map_err(|e| GitError::Command(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(file_path).map_err(|e| GitError::Command(e.to_string()))?;
 
         let file_name = file_path
             .file_name()

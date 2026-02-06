@@ -92,11 +92,7 @@ impl TemplateConfig {
     }
 
     /// Copy files matching glob patterns from source to destination worktree
-    pub fn copy_files(
-        &self,
-        source_root: &Path,
-        dest_root: &Path,
-    ) -> Vec<FileCopyResult> {
+    pub fn copy_files(&self, source_root: &Path, dest_root: &Path) -> Vec<FileCopyResult> {
         let mut results = Vec::new();
 
         for pattern in &self.file_copies {

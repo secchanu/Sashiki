@@ -124,6 +124,7 @@ impl SashikiApp {
             && let Ok(worktrees) = repo.list_worktrees()
         {
             self.session_manager.sync_with_worktrees(worktrees);
+            self.apply_template_working_directory_defaults();
         }
         cx.notify();
     }
