@@ -1,7 +1,7 @@
 //! Action definitions and event handlers
 
 use super::SashikiApp;
-use gpui::{Context, Focusable, Window, actions};
+use gpui::{Context, Focusable, PathPromptOptions, Window, actions};
 
 actions!(
     sashiki,
@@ -14,6 +14,8 @@ actions!(
         RefreshAll,
         CreateWorktree,
         CloseFileView,
+        OpenProject,
+        Quit,
     ]
 );
 
@@ -126,5 +128,29 @@ impl SashikiApp {
             self.session_manager.sync_with_worktrees(worktrees);
         }
         cx.notify();
+    }
+
+    pub fn on_open_project(&mut self, _: &OpenProject, _: &mut Window, cx: &mut Context<Self>) {
+        let paths_rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select Git Repository".into()),
+        });
+
+        cx.spawn(async move |entity, cx| {
+            if let Ok(Ok(Some(paths))) = paths_rx.await {
+                if let Some(path) = paths.into_iter().next() {
+                    let _ = entity.update(cx, |app, cx| {
+                        app.reset_with_path(path, cx);
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn on_quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
+        cx.quit();
     }
 }

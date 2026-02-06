@@ -12,10 +12,10 @@ mod theme;
 mod ui;
 
 use app::{
-    CloseFileView, NextSession, PrevSession, RefreshAll, SashikiApp, ToggleFileList,
-    ToggleParallelMode, ToggleSidebar,
+    CloseFileView, NextSession, OpenProject, PrevSession, Quit, RefreshAll, SashikiApp,
+    ToggleFileList, ToggleParallelMode, ToggleSidebar,
 };
-use gpui::{App, AppContext, Application, Focusable, KeyBinding, WindowOptions};
+use gpui::{App, AppContext, Application, Focusable, KeyBinding, Menu, MenuItem, WindowOptions};
 use terminal::TerminalView;
 
 fn main() {
@@ -24,6 +24,8 @@ fn main() {
         // GPUI resolves ties (same context depth) by LIFO, so terminal-specific
         // bindings registered later will correctly override these when focused.
         app.bind_keys([
+            KeyBinding::new("ctrl-o", OpenProject, None),
+            KeyBinding::new("ctrl-q", Quit, None),
             KeyBinding::new("ctrl-p", ToggleParallelMode, None),
             KeyBinding::new("ctrl-tab", NextSession, None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),
@@ -31,6 +33,22 @@ fn main() {
             KeyBinding::new("ctrl-e", ToggleFileList, None),
             KeyBinding::new("ctrl-r", RefreshAll, None),
             KeyBinding::new("escape", CloseFileView, None),
+        ]);
+
+        app.set_menus(vec![
+            Menu {
+                name: "Sashiki".into(),
+                items: vec![
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Sashiki", Quit),
+                ],
+            },
+            Menu {
+                name: "File".into(),
+                items: vec![
+                    MenuItem::action("Open Project...", OpenProject),
+                ],
+            },
         ]);
 
         TerminalView::bind_keys(app);

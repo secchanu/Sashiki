@@ -11,7 +11,7 @@ use crate::terminal::TerminalView;
 use crate::ui::{FileListMode, FileTreeNode, FileView};
 use gpui::{AppContext, Context, Entity, FocusHandle};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use actions::*;
 
@@ -110,5 +110,68 @@ impl SashikiApp {
                 view.write_text(text);
             });
         }
+    }
+
+    /// Reset the app with a new project directory
+    pub fn reset_with_path(&mut self, path: impl AsRef<Path>, cx: &mut Context<Self>) {
+        // Shutdown all existing terminals
+        for i in 0..self.session_manager.len() {
+            if let Some(terminal) = self.session_manager.get_session_active_terminal(i) {
+                terminal.update(cx, |view, _cx| view.shutdown());
+            }
+            self.session_manager.clear_session_terminals(i);
+        }
+
+        // Clear file view state
+        self.file_view.update(cx, |view, _cx| view.close());
+        self.show_file_view = false;
+        self.changed_files.clear();
+        self.file_tree = None;
+        self.expanded_dirs.clear();
+        self.cached_worktree = None;
+
+        // Open new git repo
+        let path = path.as_ref();
+        match GitRepo::open(path) {
+            Ok(repo) => {
+                match repo.list_worktrees() {
+                    Ok(worktrees) if !worktrees.is_empty() => {
+                        self.session_manager.init_from_worktrees(worktrees);
+                        self.session_manager.ensure_session_terminal(0, cx);
+                        self.session_manager.switch_to(0);
+                        self.git_repo = Some(repo);
+                        self.active_dialog = ActiveDialog::None;
+                        self.refresh_changed_files_sync();
+                        self.build_file_tree();
+                    }
+                    Ok(_) => {
+                        self.git_repo = Some(repo);
+                        self.session_manager.init_from_worktrees(Vec::new());
+                        self.active_dialog = ActiveDialog::Error {
+                            message: "No worktrees found in repository".to_string(),
+                        };
+                    }
+                    Err(e) => {
+                        self.git_repo = Some(repo);
+                        self.session_manager.init_from_worktrees(Vec::new());
+                        self.active_dialog = ActiveDialog::Error {
+                            message: format!("Failed to list worktrees: {}", e),
+                        };
+                    }
+                }
+            }
+            Err(_) => {
+                self.git_repo = None;
+                self.session_manager.init_from_worktrees(Vec::new());
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!(
+                        "Git repository not found in: {}",
+                        path.display()
+                    ),
+                };
+            }
+        }
+
+        cx.notify();
     }
 }

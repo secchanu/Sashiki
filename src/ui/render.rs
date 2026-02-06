@@ -32,6 +32,8 @@ impl Render for SashikiApp {
             .on_action(cx.listener(Self::on_toggle_file_list))
             .on_action(cx.listener(Self::on_refresh_all))
             .on_action(cx.listener(Self::on_close_file_view))
+            .on_action(cx.listener(Self::on_open_project))
+            .on_action(cx.listener(Self::on_quit))
             .child(self.render_header(layout_mode, session_count, running_session_count, cx))
             .child(self.render_main_content(layout_mode, cx))
             .when(
