@@ -4,7 +4,7 @@ use super::SashikiApp;
 use crate::dialog::ActiveDialog;
 use crate::git::{GitRepo, validate_branch_name};
 use crate::template::{self, TemplateConfig};
-use gpui::{Context, Focusable, Window};
+use gpui::{Context, Focusable, PathPromptOptions, Window};
 use std::path::{Path, PathBuf};
 
 impl SashikiApp {
@@ -522,5 +522,34 @@ impl SashikiApp {
             window.focus(&focus, cx);
         }
         cx.notify();
+    }
+
+    // === Open folder ===
+
+    pub fn on_open_folder(
+        &mut self,
+        _: &super::OpenFolder,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu = None;
+
+        let paths_receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+
+        cx.spawn(async move |entity, cx| {
+            if let Ok(Ok(Some(paths))) = paths_receiver.await {
+                if let Some(path) = paths.into_iter().next() {
+                    let _ = entity.update(cx, |app, cx| {
+                        app.open_project(path, cx);
+                    });
+                }
+            }
+        })
+        .detach();
     }
 }

@@ -14,6 +14,8 @@ actions!(
         RefreshAll,
         CreateWorktree,
         CloseFileView,
+        OpenFolder,
+        Quit,
     ]
 );
 

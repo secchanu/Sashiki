@@ -16,6 +16,14 @@ use std::path::PathBuf;
 
 pub use actions::*;
 
+/// Identifies which menu is currently open
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuId {
+    App,
+    File,
+    View,
+}
+
 /// Main application state
 pub struct SashikiApp {
     pub(crate) session_manager: SessionManager,
@@ -43,6 +51,8 @@ pub struct SashikiApp {
     /// Which section is active in settings (0=pre, 1=copy, 2=post, 3=workdir)
     pub(crate) settings_active_section: usize,
     pub(crate) settings_dialog_focus: FocusHandle,
+    /// Which menu dropdown is currently open (None = all closed)
+    pub(crate) open_menu: Option<MenuId>,
 }
 
 impl SashikiApp {
@@ -111,6 +121,7 @@ impl SashikiApp {
             settings_cursors: Default::default(),
             settings_active_section: 0,
             settings_dialog_focus: cx.focus_handle(),
+            open_menu: None,
         };
 
         app.refresh_changed_files_sync();
@@ -129,6 +140,80 @@ impl SashikiApp {
                 view.write_text(text);
             });
         }
+    }
+
+    /// Open a new project (Git repository) at the given path.
+    /// Shuts down all current terminals, resets state, and initializes from the new repo.
+    pub fn open_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // 1. Shutdown all session terminals
+        for i in 0..self.session_manager.len() {
+            if let Some(terminal) = self.session_manager.get_session_active_terminal(i) {
+                terminal.update(cx, |view, _cx| view.shutdown());
+            }
+            self.session_manager.clear_session_terminals(i);
+        }
+
+        // 2. Close file view
+        self.file_view.update(cx, |view, _cx| view.close());
+        self.show_file_view = false;
+
+        // 3. Reset cached state
+        self.cached_worktree = None;
+        self.changed_files.clear();
+        self.expanded_dirs.clear();
+        self.file_tree = None;
+
+        // 4. Open new repository
+        let repo = match GitRepo::open(&path) {
+            Ok(r) => r,
+            Err(e) => {
+                self.active_dialog = crate::dialog::ActiveDialog::Error {
+                    message: format!("Failed to open repository: {}", e),
+                };
+                cx.notify();
+                return;
+            }
+        };
+
+        // 5. List worktrees and initialize sessions
+        let worktrees = match repo.list_worktrees() {
+            Ok(w) if !w.is_empty() => w,
+            Ok(_) => {
+                self.active_dialog = crate::dialog::ActiveDialog::Error {
+                    message: "No worktrees found in repository".to_string(),
+                };
+                self.git_repo = Some(repo);
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                self.active_dialog = crate::dialog::ActiveDialog::Error {
+                    message: format!("Failed to list worktrees: {}", e),
+                };
+                cx.notify();
+                return;
+            }
+        };
+
+        self.git_repo = Some(repo);
+        self.session_manager.init_from_worktrees(worktrees);
+
+        // 6. Apply template defaults
+        if let Some(ref repo) = self.git_repo {
+            let template = TemplateConfig::load(repo);
+            self.session_manager
+                .apply_terminal_default_directory_to_all(template.working_directory.as_deref());
+        }
+
+        // 7. Start first session terminal
+        self.session_manager.ensure_session_terminal(0, cx);
+        self.session_manager.switch_to(0);
+
+        // 8. Refresh file list
+        self.refresh_changed_files_sync();
+        self.build_file_tree();
+
+        cx.notify();
     }
 
     pub(crate) fn apply_template_working_directory_defaults(&mut self) {
