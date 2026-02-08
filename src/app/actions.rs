@@ -7,6 +7,7 @@ actions!(
     sashiki,
     [
         ToggleParallelMode,
+        ToggleVerifyTerminal,
         NextSession,
         PrevSession,
         ToggleSidebar,
@@ -30,9 +31,27 @@ impl SashikiApp {
         cx.notify();
     }
 
+    pub fn on_toggle_verify_terminal(
+        &mut self,
+        _: &ToggleVerifyTerminal,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_verify_terminal = !self.show_verify_terminal;
+        if self.show_verify_terminal {
+            self.session_manager
+                .ensure_active_session_terminal_count(2, cx);
+        }
+        cx.notify();
+    }
+
     /// Start terminal for active session, focus it, and refresh file list
     pub fn activate_and_focus_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.session_manager.ensure_active_session_terminal(cx);
+        if self.show_verify_terminal {
+            self.session_manager
+                .ensure_active_session_terminal_count(2, cx);
+        }
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
             window.focus(&focus, cx);

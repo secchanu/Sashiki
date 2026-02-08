@@ -188,6 +188,26 @@ impl Session {
         }
     }
 
+    /// Get a terminal by index
+    pub fn get_terminal(&self, index: usize) -> Option<&Entity<TerminalView>> {
+        self.terminals.get(index)
+    }
+
+    /// Ensure the session has at least `count` terminals (without changing active_terminal_index)
+    pub fn ensure_terminal_count<V: 'static>(&mut self, count: usize, cx: &mut Context<V>) {
+        while self.terminals.len() < count {
+            let path = self
+                .terminal_default_directory
+                .clone()
+                .unwrap_or_else(|| self.worktree.path.clone());
+            let terminal = cx.new(|cx| TerminalView::new_with_directory(path, cx));
+            self.terminals.push(terminal);
+            if self.status == SessionStatus::Stopped {
+                self.status = SessionStatus::Running;
+            }
+        }
+    }
+
     /// Check if this session has any terminals
     pub fn has_terminals(&self) -> bool {
         !self.terminals.is_empty()
@@ -338,6 +358,17 @@ impl SessionManager {
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| session.worktree_path().join(s));
             session.set_terminal_default_directory(path);
+        }
+    }
+
+    /// Ensure the active session has at least `count` terminals
+    pub fn ensure_active_session_terminal_count<V: 'static>(
+        &mut self,
+        count: usize,
+        cx: &mut Context<V>,
+    ) {
+        if let Some(session) = self.sessions.get_mut(self.active_index) {
+            session.ensure_terminal_count(count, cx);
         }
     }
 

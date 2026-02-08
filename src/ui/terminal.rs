@@ -38,7 +38,19 @@ impl SashikiApp {
         }
 
         let active_index = self.session_manager.active_index();
-        self.render_terminal_panel(active_index, true, cx)
+
+        if self.show_verify_terminal {
+            div()
+                .flex_1()
+                .flex()
+                .flex_row()
+                .overflow_hidden()
+                .child(self.render_terminal_panel(active_index, true, cx))
+                .child(self.render_verify_terminal_panel(active_index, cx))
+                .into_any_element()
+        } else {
+            self.render_terminal_panel(active_index, true, cx)
+        }
     }
 
     fn render_parallel_mode(&self, cx: &Context<Self>) -> AnyElement {
@@ -151,6 +163,67 @@ impl SashikiApp {
                 is_locked,
                 path_display,
             }))
+            .child(terminal_content)
+            .into_any_element()
+    }
+
+    fn render_verify_terminal_panel(
+        &self,
+        session_index: usize,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        let sessions = self.session_manager.sessions();
+        let session = &sessions[session_index];
+        let color = session.color().primary;
+
+        let terminal_content: AnyElement =
+            if let Some(terminal) = session.get_terminal(1) {
+                div()
+                    .flex_1()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .child(terminal.clone())
+                    .into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(BG_BASE))
+                    .text_color(rgb(TEXT_MUTED))
+                    .child("Verify terminal not started")
+                    .into_any_element()
+            };
+
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .border_2()
+            .border_color(rgb(BG_SURFACE0))
+            .rounded_md()
+            .m_1()
+            .child(
+                div()
+                    .h_8()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .bg(rgb(BG_MANTLE))
+                    .border_b_2()
+                    .border_color(rgb(color))
+                    .child(
+                        div()
+                            .text_color(rgb(color))
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("Verify"),
+                    ),
+            )
             .child(terminal_content)
             .into_any_element()
     }

@@ -53,6 +53,8 @@ pub struct SashikiApp {
     pub(crate) settings_dialog_focus: FocusHandle,
     /// Which menu dropdown is currently open (None = all closed)
     pub(crate) open_menu: Option<MenuId>,
+    /// Whether the verify terminal (2nd terminal) is shown in single mode
+    pub(crate) show_verify_terminal: bool,
 }
 
 impl SashikiApp {
@@ -122,6 +124,7 @@ impl SashikiApp {
             settings_active_section: 0,
             settings_dialog_focus: cx.focus_handle(),
             open_menu: None,
+            show_verify_terminal: false,
         };
 
         app.refresh_changed_files_sync();
@@ -153,9 +156,10 @@ impl SashikiApp {
             self.session_manager.clear_session_terminals(i);
         }
 
-        // 2. Close file view
+        // 2. Close file view and reset verify terminal
         self.file_view.update(cx, |view, _cx| view.close());
         self.show_file_view = false;
+        self.show_verify_terminal = false;
 
         // 3. Reset cached state
         self.cached_worktree = None;
