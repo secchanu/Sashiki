@@ -4,7 +4,10 @@ use crate::app::SashikiApp;
 use crate::session::{LayoutMode, SessionStatus};
 use crate::theme::*;
 use crate::ui::{render_locked_badge, render_main_badge};
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, rgb};
+use crate::app::ResizeDrag;
+use gpui::{
+    AnyElement, Context, DefiniteLength, IntoElement, ParentElement, Styled, div, prelude::*, rgb,
+};
 
 /// Properties for rendering a terminal header
 struct TerminalHeaderProps {
@@ -15,6 +18,7 @@ struct TerminalHeaderProps {
     is_main: bool,
     is_locked: bool,
     path_display: String,
+    show_verify_button: bool,
 }
 
 impl SashikiApp {
@@ -40,13 +44,35 @@ impl SashikiApp {
         let active_index = self.session_manager.active_index();
 
         if self.show_verify_terminal {
+            let ratio = self.terminal_split_ratio;
             div()
                 .flex_1()
                 .flex()
                 .flex_row()
                 .overflow_hidden()
-                .child(self.render_terminal_panel(active_index, true, cx))
-                .child(self.render_verify_terminal_panel(active_index, cx))
+                .child(
+                    div()
+                        .w(DefiniteLength::Fraction(ratio))
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(self.render_terminal_panel(active_index, true, cx)),
+                )
+                .child(self.render_resize_handle_v(
+                    ResizeDrag::TerminalSplit {
+                        start_x: 0.0,
+                        initial_ratio: self.terminal_split_ratio,
+                    },
+                    cx,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(self.render_verify_terminal_panel(active_index, cx)),
+                )
                 .into_any_element()
         } else {
             self.render_terminal_panel(active_index, true, cx)
@@ -108,7 +134,7 @@ impl SashikiApp {
         &self,
         session_index: usize,
         is_focused: bool,
-        _cx: &Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let sessions = self.session_manager.sessions();
         let session = &sessions[session_index];
@@ -119,6 +145,8 @@ impl SashikiApp {
         let is_locked = session.is_locked();
         let status = session.status();
         let path_display = session.worktree_path().to_string_lossy().to_string();
+        let show_verify_button =
+            is_focused && self.session_manager.layout_mode() == LayoutMode::Single;
 
         let terminal_content: AnyElement = if let Some(terminal) = session.active_terminal() {
             div()
@@ -154,15 +182,19 @@ impl SashikiApp {
             })
             .rounded_md()
             .m_1()
-            .child(self.render_terminal_header(TerminalHeaderProps {
-                name,
-                branch,
-                color,
-                status,
-                is_main,
-                is_locked,
-                path_display,
-            }))
+            .child(self.render_terminal_header(
+                TerminalHeaderProps {
+                    name,
+                    branch,
+                    color,
+                    status,
+                    is_main,
+                    is_locked,
+                    path_display,
+                    show_verify_button,
+                },
+                cx,
+            ))
             .child(terminal_content)
             .into_any_element()
     }
@@ -228,7 +260,11 @@ impl SashikiApp {
             .into_any_element()
     }
 
-    fn render_terminal_header(&self, props: TerminalHeaderProps) -> impl IntoElement {
+    fn render_terminal_header(
+        &self,
+        props: TerminalHeaderProps,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let TerminalHeaderProps {
             name,
             branch,
@@ -237,7 +273,10 @@ impl SashikiApp {
             is_main,
             is_locked,
             path_display,
+            show_verify_button,
         } = props;
+
+        let verify_active = self.show_verify_terminal;
 
         div()
             .h_8()
@@ -279,6 +318,37 @@ impl SashikiApp {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when(show_verify_button, |el| {
+                        el.child(
+                            div()
+                                .id("toggle-verify-btn")
+                                .px_2()
+                                .py_1()
+                                .cursor_pointer()
+                                .rounded_sm()
+                                .bg(if verify_active {
+                                    rgb(MAUVE)
+                                } else {
+                                    rgb(BG_SURFACE0)
+                                })
+                                .text_color(if verify_active {
+                                    rgb(BG_BASE)
+                                } else {
+                                    rgb(TEXT_MUTED)
+                                })
+                                .hover(|el| el.bg(rgb(BG_SURFACE2)))
+                                .text_xs()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_verify_terminal = !this.show_verify_terminal;
+                                    if this.show_verify_terminal {
+                                        this.session_manager
+                                            .ensure_active_session_terminal_count(2, cx);
+                                    }
+                                    cx.notify();
+                                }))
+                                .child("Verify"),
+                        )
+                    })
                     .when_some(branch, |el, branch_name| {
                         el.child(
                             div()

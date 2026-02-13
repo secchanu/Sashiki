@@ -24,6 +24,15 @@ pub enum MenuId {
     View,
 }
 
+/// Tracks which panel boundary is being dragged for resize
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ResizeDrag {
+    Sidebar { start_x: f32, initial_width: f32 },
+    FileViewTerminal { start_y: f32, initial_height: f32 },
+    TerminalSplit { start_x: f32, initial_ratio: f32 },
+    FileList { start_x: f32, initial_width: f32 },
+}
+
 /// Main application state
 pub struct SashikiApp {
     pub(crate) session_manager: SessionManager,
@@ -55,6 +64,11 @@ pub struct SashikiApp {
     pub(crate) open_menu: Option<MenuId>,
     /// Whether the verify terminal (2nd terminal) is shown in single mode
     pub(crate) show_verify_terminal: bool,
+    pub(crate) sidebar_width: f32,
+    pub(crate) file_view_height: f32,
+    pub(crate) terminal_split_ratio: f32,
+    pub(crate) file_list_width: f32,
+    pub(crate) resize_drag: Option<ResizeDrag>,
 }
 
 impl SashikiApp {
@@ -125,6 +139,11 @@ impl SashikiApp {
             settings_dialog_focus: cx.focus_handle(),
             open_menu: None,
             show_verify_terminal: false,
+            sidebar_width: 224.0,
+            file_view_height: 384.0,
+            terminal_split_ratio: 0.5,
+            file_list_width: 256.0,
+            resize_drag: None,
         };
 
         app.refresh_changed_files_sync();

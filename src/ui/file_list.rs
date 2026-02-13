@@ -31,11 +31,9 @@ impl SashikiApp {
         let mode = self.file_list_mode;
 
         div()
-            .w_64()
+            .w(px(self.file_list_width))
             .h_full()
             .bg(rgb(BG_MANTLE))
-            .border_l_1()
-            .border_color(rgb(BG_SURFACE0))
             .flex()
             .flex_col()
             .child(self.render_file_list_header(mode, cx))

@@ -4,7 +4,7 @@ use crate::app::SashikiApp;
 use crate::session::{LayoutMode, SessionStatus};
 use crate::theme::*;
 use crate::ui::{render_locked_badge, render_main_badge};
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, rgb};
+use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, px, rgb};
 
 impl SashikiApp {
     pub fn render_sidebar(&self, cx: &Context<Self>) -> AnyElement {
@@ -13,11 +13,9 @@ impl SashikiApp {
         let layout_mode = self.session_manager.layout_mode();
 
         div()
-            .w_56()
+            .w(px(self.sidebar_width))
             .h_full()
             .bg(rgb(BG_MANTLE))
-            .border_r_1()
-            .border_color(rgb(BG_SURFACE0))
             .flex()
             .flex_col()
             .child(self.render_sidebar_header(layout_mode, cx))

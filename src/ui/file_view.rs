@@ -2,8 +2,8 @@
 
 use crate::theme::*;
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, ParentElement,
-    Render, ScrollHandle, Styled, Window, div, prelude::*, rgb,
+    App, Context, DefiniteLength, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton,
+    ParentElement, Render, ScrollHandle, Styled, Window, div, prelude::*, px, rgb,
 };
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -55,6 +55,11 @@ enum InlineChangeType {
     Deleted,
 }
 
+struct DiffResizeDrag {
+    start_x: f32,
+    initial_ratio: f32,
+}
+
 /// File view component - read-only viewer
 pub struct FileView {
     file_path: Option<PathBuf>,
@@ -70,6 +75,8 @@ pub struct FileView {
     cached_right_lines: Rc<Vec<SplitDiffLine>>,
     /// Shared scroll handle for synchronized split diff scrolling
     diff_scroll_handle: ScrollHandle,
+    diff_split_ratio: f32,
+    diff_resize_drag: Option<DiffResizeDrag>,
 }
 
 impl FileView {
@@ -84,6 +91,8 @@ impl FileView {
             cached_left_lines: Rc::new(Vec::new()),
             cached_right_lines: Rc::new(Vec::new()),
             diff_scroll_handle: ScrollHandle::new(),
+            diff_split_ratio: 0.5,
+            diff_resize_drag: None,
         }
     }
 
@@ -574,48 +583,85 @@ impl FileView {
             )
     }
 
-    fn render_diff(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_diff(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let left_lines = self.cached_left_lines.clone();
         let right_lines = self.cached_right_lines.clone();
         let scroll_handle = self.diff_scroll_handle.clone();
-
-        // Pair up left and right lines for synchronized rendering
-        let line_count = left_lines.len().max(right_lines.len());
-        let line_pairs: Vec<_> = (0..line_count)
-            .map(|i| (left_lines.get(i).cloned(), right_lines.get(i).cloned()))
-            .collect();
+        let ratio = self.diff_split_ratio;
 
         div()
+            .id("diff-view")
             .flex_1()
             .flex()
-            .flex_col()
+            .flex_row()
             .overflow_hidden()
             .bg(rgb(BG_BASE))
-            // Fixed header row
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if this.diff_resize_drag.is_some() {
+                    this.handle_diff_resize_move(f32::from(event.position.x));
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.diff_resize_drag.is_some() {
+                        this.handle_diff_resize_end();
+                        cx.notify();
+                    }
+                }),
+            )
+            // Left column (header + content)
             .child(
                 div()
-                    .h_6()
-                    .flex_shrink_0()
+                    .w(DefiniteLength::Fraction(ratio))
+                    .min_w_0()
                     .flex()
-                    .flex_row()
+                    .flex_col()
+                    .overflow_hidden()
                     .child(
                         div()
-                            .w_1_2()
-                            .min_w_0()
+                            .h_6()
+                            .flex_shrink_0()
                             .px_2()
                             .flex()
                             .items_center()
                             .bg(rgb(BG_MANTLE))
-                            .border_r_1()
-                            .border_color(rgb(BG_SURFACE0))
                             .text_xs()
                             .text_color(rgb(RED))
                             .child("Before (HEAD)"),
                     )
                     .child(
                         div()
-                            .w_1_2()
-                            .min_w_0()
+                            .id("diff-scroll-left")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .track_scroll(&scroll_handle)
+                            .pl_2()
+                            .py_2()
+                            .font_family(MONOSPACE_FONT)
+                            .text_sm()
+                            .children(
+                                left_lines
+                                    .iter()
+                                    .map(|line| Self::render_diff_line(line, true)),
+                            ),
+                    ),
+            )
+            // Single resize handle spanning full height (header + content)
+            .child(self.render_diff_resize_handle(cx))
+            // Right column (header + content)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_6()
+                            .flex_shrink_0()
                             .px_2()
                             .flex()
                             .items_center()
@@ -623,46 +669,27 @@ impl FileView {
                             .text_xs()
                             .text_color(rgb(GREEN))
                             .child("After (Working)"),
-                    ),
-            )
-            // Synchronized scrolling content - row by row
-            .child(
-                div()
-                    .id("diff-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll_handle)
-                    .p_2()
-                    .font_family(MONOSPACE_FONT)
-                    .text_sm()
-                    .children(
-                        line_pairs
-                            .into_iter()
-                            .map(|(left, right)| Self::render_diff_row(left, right)),
+                    )
+                    .child(
+                        div()
+                            .id("diff-scroll-right")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .track_scroll(&scroll_handle)
+                            .pr_2()
+                            .py_2()
+                            .font_family(MONOSPACE_FONT)
+                            .text_sm()
+                            .children(
+                                right_lines
+                                    .iter()
+                                    .map(|line| Self::render_diff_line(line, false)),
+                            ),
                     ),
             )
     }
 
-    fn render_diff_row(
-        left: Option<SplitDiffLine>,
-        right: Option<SplitDiffLine>,
-    ) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_row()
-            .child(Self::render_diff_half(left, true))
-            .child(Self::render_diff_half(right, false))
-    }
-
-    fn render_diff_half(line: Option<SplitDiffLine>, is_left: bool) -> impl IntoElement {
-        let empty_line = SplitDiffLine {
-            old_line_num: None,
-            new_line_num: None,
-            content: String::new(),
-            line_type: DiffLineType::Context,
-        };
-        let line = line.unwrap_or(empty_line);
-
+    fn render_diff_line(line: &SplitDiffLine, is_left: bool) -> impl IntoElement {
         let (bg_color, text_color) = match line.line_type {
             DiffLineType::Added => (Some(rgb(DIFF_ADDED_BG)), rgb(GREEN)),
             DiffLineType::Removed => (Some(rgb(DIFF_REMOVED_BG)), rgb(RED)),
@@ -678,16 +705,13 @@ impl FileView {
         let content = if line.content.is_empty() {
             " ".to_string()
         } else {
-            line.content
+            line.content.clone()
         };
 
-        let mut el = div().w_1_2().min_w_0().flex().flex_row();
-
-        if is_left {
-            el = el.border_r_1().border_color(rgb(BG_SURFACE0));
-        }
-
-        el.when_some(bg_color, |el, color| el.bg(color))
+        div()
+            .flex()
+            .flex_row()
+            .when_some(bg_color, |el, color| el.bg(color))
             .child(
                 div()
                     .w_10()
@@ -704,6 +728,44 @@ impl FileView {
                     .text_color(text_color)
                     .child(content),
             )
+    }
+
+    fn render_diff_resize_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("diff-resize-handle")
+            .h_full()
+            .w(px(4.0))
+            .flex_shrink_0()
+            .cursor_col_resize()
+            .hover(|el| el.bg(rgb(BLUE)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.diff_resize_drag = Some(DiffResizeDrag {
+                        start_x: f32::from(event.position.x),
+                        initial_ratio: this.diff_split_ratio,
+                    });
+                    cx.notify();
+                }),
+            )
+    }
+
+    fn handle_diff_resize_move(&mut self, current_x: f32) {
+        if let Some(ref drag) = self.diff_resize_drag {
+            let container_width = if drag.initial_ratio > 0.0 {
+                (drag.start_x - 0.0) / drag.initial_ratio
+            } else {
+                1.0
+            };
+            if container_width > 0.0 {
+                let ratio_delta = (current_x - drag.start_x) / container_width;
+                self.diff_split_ratio = (drag.initial_ratio + ratio_delta).clamp(0.2, 0.8);
+            }
+        }
+    }
+
+    fn handle_diff_resize_end(&mut self) {
+        self.diff_resize_drag = None;
     }
 }
 

@@ -1,11 +1,12 @@
 //! Render trait implementation for SashikiApp
 
-use crate::app::{MenuId, SashikiApp};
+use crate::app::{MenuId, ResizeDrag, SashikiApp};
 use crate::dialog::ActiveDialog;
 use crate::session::LayoutMode;
 use crate::theme::*;
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, Render, Styled, Window, div, prelude::*, rgb,
+    App, Context, FocusHandle, Focusable, IntoElement, MouseButton, Render, Styled, Window, div,
+    prelude::*, px, rgb,
 };
 
 impl Focusable for SashikiApp {
@@ -354,14 +355,34 @@ impl SashikiApp {
             )
     }
 
-    fn render_main_content(&self, layout_mode: LayoutMode, cx: &Context<Self>) -> impl IntoElement {
+    fn render_main_content(&mut self, layout_mode: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("main-content")
             .flex_1()
             .flex()
             .flex_row()
             .overflow_hidden()
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if this.resize_drag.is_some() {
+                    this.handle_resize_drag_move(f32::from(event.position.x), f32::from(event.position.y));
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.resize_drag.is_some() {
+                        this.handle_resize_drag_end();
+                        cx.notify();
+                    }
+                }),
+            )
             .when(self.show_sidebar, |this| {
                 this.child(self.render_sidebar(cx))
+                    .child(self.render_resize_handle_v(ResizeDrag::Sidebar {
+                        start_x: 0.0,
+                        initial_width: self.sidebar_width,
+                    }, cx))
             })
             .child(
                 div()
@@ -374,12 +395,12 @@ impl SashikiApp {
                         |this| {
                             this.child(
                                 div()
-                                    .h_96()
-                                    .min_h_48()
-                                    .border_b_1()
-                                    .border_color(rgb(BG_SURFACE0))
+                                    .h(px(self.file_view_height))
+                                    .min_h(px(100.0))
+                                    .flex_shrink_0()
                                     .child(self.file_view.clone()),
                             )
+                            .child(self.render_resize_handle_h(cx))
                         },
                     )
                     .child(
@@ -393,7 +414,107 @@ impl SashikiApp {
             )
             .when(
                 self.show_file_list && layout_mode == LayoutMode::Single,
-                |this| this.child(self.render_file_list(cx)),
+                |this| {
+                    this.child(self.render_resize_handle_v(ResizeDrag::FileList {
+                        start_x: 0.0,
+                        initial_width: self.file_list_width,
+                    }, cx))
+                    .child(self.render_file_list(cx))
+                },
             )
+    }
+
+    pub(crate) fn render_resize_handle_v(&self, drag_variant: ResizeDrag, cx: &Context<Self>) -> impl IntoElement {
+        let initial = drag_variant;
+        div()
+            .id(match initial {
+                ResizeDrag::Sidebar { .. } => "resize-sidebar",
+                ResizeDrag::FileList { .. } => "resize-filelist",
+                ResizeDrag::TerminalSplit { .. } => "resize-terminal-split",
+                _ => "resize-v",
+            })
+            .h_full()
+            .w(px(4.0))
+            .flex_shrink_0()
+            .cursor_col_resize()
+            .hover(|el| el.bg(rgb(BLUE)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    let x = f32::from(event.position.x);
+                    this.resize_drag = Some(match initial {
+                        ResizeDrag::Sidebar { .. } => ResizeDrag::Sidebar {
+                            start_x: x,
+                            initial_width: this.sidebar_width,
+                        },
+                        ResizeDrag::FileList { .. } => ResizeDrag::FileList {
+                            start_x: x,
+                            initial_width: this.file_list_width,
+                        },
+                        ResizeDrag::TerminalSplit { .. } => ResizeDrag::TerminalSplit {
+                            start_x: x,
+                            initial_ratio: this.terminal_split_ratio,
+                        },
+                        other => other,
+                    });
+                    cx.notify();
+                }),
+            )
+    }
+
+    fn render_resize_handle_h(&self, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .id("resize-fileview-terminal")
+            .w_full()
+            .h(px(4.0))
+            .flex_shrink_0()
+            .cursor_row_resize()
+            .hover(|el| el.bg(rgb(BLUE)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.resize_drag = Some(ResizeDrag::FileViewTerminal {
+                        start_y: f32::from(event.position.y),
+                        initial_height: this.file_view_height,
+                    });
+                    cx.notify();
+                }),
+            )
+    }
+
+    fn handle_resize_drag_move(&mut self, current_x: f32, current_y: f32) {
+        let drag = match self.resize_drag {
+            Some(d) => d,
+            None => return,
+        };
+        match drag {
+            ResizeDrag::Sidebar { start_x, initial_width } => {
+                let new_width = (initial_width + (current_x - start_x)).clamp(120.0, 500.0);
+                self.sidebar_width = new_width;
+            }
+            ResizeDrag::FileViewTerminal { start_y, initial_height } => {
+                let new_height = (initial_height + (current_y - start_y)).clamp(100.0, 800.0);
+                self.file_view_height = new_height;
+            }
+            ResizeDrag::TerminalSplit { start_x, initial_ratio } => {
+                let container_width = if initial_ratio > 0.0 {
+                    (start_x - 0.0) / initial_ratio
+                } else {
+                    1.0
+                };
+                if container_width > 0.0 {
+                    let ratio_delta = (current_x - start_x) / container_width;
+                    self.terminal_split_ratio = (initial_ratio + ratio_delta).clamp(0.2, 0.8);
+                }
+            }
+            ResizeDrag::FileList { start_x, initial_width } => {
+                let new_width = (initial_width - (current_x - start_x)).clamp(120.0, 500.0);
+                self.file_list_width = new_width;
+            }
+        }
+    }
+
+    fn handle_resize_drag_end(&mut self) {
+        self.resize_drag = None;
     }
 }
