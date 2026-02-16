@@ -1,10 +1,10 @@
 //! Terminal panel rendering
 
+use crate::app::ResizeDrag;
 use crate::app::SashikiApp;
 use crate::session::{LayoutMode, SessionStatus};
 use crate::theme::*;
 use crate::ui::{render_locked_badge, render_main_badge};
-use crate::app::ResizeDrag;
 use gpui::{
     AnyElement, Context, DefiniteLength, IntoElement, ParentElement, Styled, div, prelude::*, rgb,
 };
@@ -208,27 +208,26 @@ impl SashikiApp {
         let session = &sessions[session_index];
         let color = session.color().primary;
 
-        let terminal_content: AnyElement =
-            if let Some(terminal) = session.get_terminal(1) {
-                div()
-                    .flex_1()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .child(terminal.clone())
-                    .into_any_element()
-            } else {
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgb(BG_BASE))
-                    .text_color(rgb(TEXT_MUTED))
-                    .child("Verify terminal not started")
-                    .into_any_element()
-            };
+        let terminal_content: AnyElement = if let Some(terminal) = session.get_terminal(1) {
+            div()
+                .flex_1()
+                .w_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(terminal.clone())
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(BG_BASE))
+                .text_color(rgb(TEXT_MUTED))
+                .child("Verify terminal not started")
+                .into_any_element()
+        };
 
         div()
             .flex_1()

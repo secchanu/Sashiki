@@ -6,13 +6,17 @@ mod file_ops;
 
 use crate::dialog::ActiveDialog;
 use crate::git::GitRepo;
+use crate::language::LanguageRegistry;
+use crate::lsp::LspManager;
 use crate::session::SessionManager;
 use crate::template::TemplateConfig;
 use crate::terminal::TerminalView;
-use crate::ui::{FileListMode, FileTreeNode, FileView};
+use crate::ui::{FileListMode, FileTreeNode, FileView, GotoDefinitionEvent};
+use async_lock::Mutex as AsyncMutex;
 use gpui::{AppContext, Context, Entity, FocusHandle};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub use actions::*;
 
@@ -41,6 +45,7 @@ pub struct SashikiApp {
     pub(crate) expanded_dirs: HashSet<PathBuf>,
     pub(crate) file_tree: Option<FileTreeNode>,
     pub(crate) file_view: Entity<FileView>,
+    pub(crate) language_registry: LanguageRegistry,
     pub(crate) git_repo: Option<GitRepo>,
     /// Cached repo for active worktree (avoids repeated Repository::discover() calls)
     pub(crate) cached_worktree: Option<(GitRepo, PathBuf)>,
@@ -69,6 +74,7 @@ pub struct SashikiApp {
     pub(crate) terminal_split_ratio: f32,
     pub(crate) file_list_width: f32,
     pub(crate) resize_drag: Option<ResizeDrag>,
+    pub(crate) lsp_manager: Arc<AsyncMutex<LspManager>>,
 }
 
 impl SashikiApp {
@@ -84,6 +90,12 @@ impl SashikiApp {
                 this.send_to_terminal(&event.0, cx);
             },
         )
+        .detach();
+
+        // Subscribe to GotoDefinitionEvent from FileView
+        cx.subscribe(&file_view, |this, _, event: &GotoDefinitionEvent, cx| {
+            this.handle_goto_definition(event.clone(), cx);
+        })
         .detach();
 
         let git_repo = GitRepo::open(".").ok();
@@ -123,6 +135,7 @@ impl SashikiApp {
             expanded_dirs: HashSet::new(),
             file_tree: None,
             file_view,
+            language_registry: LanguageRegistry::new(),
             git_repo,
             cached_worktree: None,
             show_sidebar: true,
@@ -144,6 +157,7 @@ impl SashikiApp {
             terminal_split_ratio: 0.5,
             file_list_width: 256.0,
             resize_drag: None,
+            lsp_manager: Arc::new(AsyncMutex::new(LspManager::new())),
         };
 
         app.refresh_changed_files_sync();
@@ -167,26 +181,7 @@ impl SashikiApp {
     /// Open a new project (Git repository) at the given path.
     /// Shuts down all current terminals, resets state, and initializes from the new repo.
     pub fn open_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        // 1. Shutdown all session terminals
-        for i in 0..self.session_manager.len() {
-            if let Some(terminal) = self.session_manager.get_session_active_terminal(i) {
-                terminal.update(cx, |view, _cx| view.shutdown());
-            }
-            self.session_manager.clear_session_terminals(i);
-        }
-
-        // 2. Close file view and reset verify terminal
-        self.file_view.update(cx, |view, _cx| view.close());
-        self.show_file_view = false;
-        self.show_verify_terminal = false;
-
-        // 3. Reset cached state
-        self.cached_worktree = None;
-        self.changed_files.clear();
-        self.expanded_dirs.clear();
-        self.file_tree = None;
-
-        // 4. Open new repository
+        // 1. Validate target repository first so current state remains intact on failure.
         let repo = match GitRepo::open(&path) {
             Ok(r) => r,
             Err(e) => {
@@ -198,14 +193,12 @@ impl SashikiApp {
             }
         };
 
-        // 5. List worktrees and initialize sessions
         let worktrees = match repo.list_worktrees() {
             Ok(w) if !w.is_empty() => w,
             Ok(_) => {
                 self.active_dialog = crate::dialog::ActiveDialog::Error {
                     message: "No worktrees found in repository".to_string(),
                 };
-                self.git_repo = Some(repo);
                 cx.notify();
                 return;
             }
@@ -218,6 +211,40 @@ impl SashikiApp {
             }
         };
 
+        // 2. Shutdown all LSP servers (drain under lock, then shut down without it)
+        let lsp = Arc::clone(&self.lsp_manager);
+        cx.spawn(async move |_, _| {
+            let old_servers = {
+                let mut manager = lsp.lock().await;
+                manager.take_servers()
+            };
+            for (_id, mut client) in old_servers {
+                let _ = client.shutdown().await;
+            }
+        })
+        .detach();
+
+        // 3. Shutdown all current session terminals.
+        for i in 0..self.session_manager.len() {
+            if let Some(terminal) = self.session_manager.get_session_active_terminal(i) {
+                terminal.update(cx, |view, _cx| view.shutdown());
+            }
+            self.session_manager.clear_session_terminals(i);
+        }
+
+        // 4. Close file view and reset project-scoped state.
+        self.file_view.update(cx, |view, _cx| view.close());
+        self.show_file_view = false;
+        self.show_verify_terminal = false;
+        self.cached_worktree = None;
+        self.changed_files.clear();
+        self.expanded_dirs.clear();
+        self.file_tree = None;
+        self.active_dialog = ActiveDialog::None;
+        self.open_menu = None;
+        self.create_branch_input.clear();
+
+        // 5. Initialize repository and sessions for the selected project.
         self.git_repo = Some(repo);
         self.session_manager.init_from_worktrees(worktrees);
 

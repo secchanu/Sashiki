@@ -6,6 +6,9 @@
 mod app;
 mod dialog;
 mod git;
+mod highlight;
+mod language;
+mod lsp;
 mod session;
 mod template;
 mod terminal;
@@ -43,15 +46,11 @@ fn main() {
         app.set_menus(vec![
             Menu {
                 name: "Sashiki".into(),
-                items: vec![
-                    MenuItem::action("Quit", Quit),
-                ],
+                items: vec![MenuItem::action("Quit", Quit)],
             },
             Menu {
                 name: "File".into(),
-                items: vec![
-                    MenuItem::action("Open Folder", OpenFolder),
-                ],
+                items: vec![MenuItem::action("Open Folder", OpenFolder)],
             },
             Menu {
                 name: "View".into(),

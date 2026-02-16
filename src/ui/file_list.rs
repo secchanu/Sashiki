@@ -190,6 +190,7 @@ impl SashikiApp {
                     this.on_file_selected(
                         click_path.clone(),
                         change_info.map(|i| i.change_type),
+                        None,
                         cx,
                     );
                 }))
@@ -327,7 +328,7 @@ impl SashikiApp {
                 .cursor_pointer()
                 .hover(|el| el.bg(rgb(BG_SURFACE0)))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.on_file_selected(click_path.clone(), None, cx);
+                    this.on_file_selected(click_path.clone(), None, None, cx);
                 }))
                 .on_mouse_down(
                     gpui::MouseButton::Right,

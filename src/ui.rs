@@ -9,7 +9,7 @@ pub mod sidebar;
 pub mod terminal;
 
 pub use file_tree::{ChangeInfo, FileListMode, FileTreeNode, read_dir_shallow};
-pub use file_view::{FileView, SendToTerminalEvent};
+pub use file_view::{FileView, GotoDefinitionEvent, SendToTerminalEvent};
 
 use crate::theme::*;
 use gpui::{IntoElement, ParentElement, Styled, div, rgb};

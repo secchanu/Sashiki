@@ -206,19 +206,32 @@ impl SashikiApp {
         match menu_id {
             MenuId::App => {
                 dropdown = dropdown
-                    .child(Self::render_menu_item("Template Settings...", None, cx, |this, window, cx| {
-                        this.open_menu = None;
-                        this.open_template_settings(window, cx);
-                    }))
+                    .child(Self::render_menu_item(
+                        "Template Settings...",
+                        None,
+                        cx,
+                        |this, window, cx| {
+                            this.open_menu = None;
+                            this.open_template_settings(window, cx);
+                        },
+                    ))
                     .child(Self::render_menu_separator())
-                    .child(Self::render_menu_item("Quit", Some("Alt+F4"), cx, |this, _, cx| {
-                        this.open_menu = None;
-                        cx.quit();
-                    }));
+                    .child(Self::render_menu_item(
+                        "Quit",
+                        Some("Alt+F4"),
+                        cx,
+                        |this, _, cx| {
+                            this.open_menu = None;
+                            cx.quit();
+                        },
+                    ));
             }
             MenuId::File => {
-                dropdown = dropdown
-                    .child(Self::render_menu_item("Open Folder...", Some("Ctrl+O"), cx, |this, _, cx| {
+                dropdown = dropdown.child(Self::render_menu_item(
+                    "Open Folder...",
+                    Some("Ctrl+O"),
+                    cx,
+                    |this, _, cx| {
                         this.open_menu = None;
                         cx.notify();
                         let paths_receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -237,40 +250,67 @@ impl SashikiApp {
                             }
                         })
                         .detach();
-                    }));
+                    },
+                ));
             }
             MenuId::View => {
                 dropdown = dropdown
-                    .child(Self::render_menu_item("Toggle Sidebar", Some("Ctrl+B"), cx, |this, _, cx| {
-                        this.open_menu = None;
-                        this.show_sidebar = !this.show_sidebar;
-                        cx.notify();
-                    }))
-                    .child(Self::render_menu_item("Toggle File List", Some("Ctrl+E"), cx, |this, _, cx| {
-                        this.open_menu = None;
-                        this.show_file_list = !this.show_file_list;
-                        cx.notify();
-                    }))
-                    .child(Self::render_menu_item("Toggle Parallel", Some("Ctrl+P"), cx, |this, _, cx| {
-                        this.open_menu = None;
-                        this.session_manager.toggle_layout_mode();
-                        cx.notify();
-                    }))
-                    .child(Self::render_menu_item("Toggle Verify Terminal", Some("Ctrl+T"), cx, |this, _, cx| {
-                        this.open_menu = None;
-                        this.show_verify_terminal = !this.show_verify_terminal;
-                        if this.show_verify_terminal {
-                            this.session_manager.ensure_active_session_terminal_count(2, cx);
-                        }
-                        cx.notify();
-                    }))
+                    .child(Self::render_menu_item(
+                        "Toggle Sidebar",
+                        Some("Ctrl+B"),
+                        cx,
+                        |this, _, cx| {
+                            this.open_menu = None;
+                            this.show_sidebar = !this.show_sidebar;
+                            cx.notify();
+                        },
+                    ))
+                    .child(Self::render_menu_item(
+                        "Toggle File List",
+                        Some("Ctrl+E"),
+                        cx,
+                        |this, _, cx| {
+                            this.open_menu = None;
+                            this.show_file_list = !this.show_file_list;
+                            cx.notify();
+                        },
+                    ))
+                    .child(Self::render_menu_item(
+                        "Toggle Parallel",
+                        Some("Ctrl+P"),
+                        cx,
+                        |this, _, cx| {
+                            this.open_menu = None;
+                            this.session_manager.toggle_layout_mode();
+                            cx.notify();
+                        },
+                    ))
+                    .child(Self::render_menu_item(
+                        "Toggle Verify Terminal",
+                        Some("Ctrl+T"),
+                        cx,
+                        |this, _, cx| {
+                            this.open_menu = None;
+                            this.show_verify_terminal = !this.show_verify_terminal;
+                            if this.show_verify_terminal {
+                                this.session_manager
+                                    .ensure_active_session_terminal_count(2, cx);
+                            }
+                            cx.notify();
+                        },
+                    ))
                     .child(Self::render_menu_separator())
-                    .child(Self::render_menu_item("Refresh All", Some("Ctrl+R"), cx, |this, _, cx| {
-                        this.open_menu = None;
-                        this.refresh_worktrees(cx);
-                        this.refresh_file_list_async(cx);
-                        cx.notify();
-                    }));
+                    .child(Self::render_menu_item(
+                        "Refresh All",
+                        Some("Ctrl+R"),
+                        cx,
+                        |this, _, cx| {
+                            this.open_menu = None;
+                            this.refresh_worktrees(cx);
+                            this.refresh_file_list_async(cx);
+                            cx.notify();
+                        },
+                    ));
             }
         }
 
@@ -302,21 +342,12 @@ impl SashikiApp {
             }))
             .child(div().text_color(rgb(TEXT)).child(label_owned))
             .when_some(shortcut_owned, |this, sc| {
-                this.child(
-                    div()
-                        .ml_4()
-                        .text_color(rgb(TEXT_MUTED))
-                        .child(sc),
-                )
+                this.child(div().ml_4().text_color(rgb(TEXT_MUTED)).child(sc))
             })
     }
 
     fn render_menu_separator() -> impl IntoElement {
-        div()
-            .my_1()
-            .mx_2()
-            .h_px()
-            .bg(rgb(BG_SURFACE1))
+        div().my_1().mx_2().h_px().bg(rgb(BG_SURFACE1))
     }
 
     /// Full-screen overlay with backdrop + positioned dropdown.
@@ -355,7 +386,11 @@ impl SashikiApp {
             )
     }
 
-    fn render_main_content(&mut self, layout_mode: LayoutMode, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_main_content(
+        &mut self,
+        layout_mode: LayoutMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .id("main-content")
             .flex_1()
@@ -364,7 +399,10 @@ impl SashikiApp {
             .overflow_hidden()
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
                 if this.resize_drag.is_some() {
-                    this.handle_resize_drag_move(f32::from(event.position.x), f32::from(event.position.y));
+                    this.handle_resize_drag_move(
+                        f32::from(event.position.x),
+                        f32::from(event.position.y),
+                    );
                     cx.notify();
                 }
             }))
@@ -379,10 +417,13 @@ impl SashikiApp {
             )
             .when(self.show_sidebar, |this| {
                 this.child(self.render_sidebar(cx))
-                    .child(self.render_resize_handle_v(ResizeDrag::Sidebar {
-                        start_x: 0.0,
-                        initial_width: self.sidebar_width,
-                    }, cx))
+                    .child(self.render_resize_handle_v(
+                        ResizeDrag::Sidebar {
+                            start_x: 0.0,
+                            initial_width: self.sidebar_width,
+                        },
+                        cx,
+                    ))
             })
             .child(
                 div()
@@ -415,16 +456,23 @@ impl SashikiApp {
             .when(
                 self.show_file_list && layout_mode == LayoutMode::Single,
                 |this| {
-                    this.child(self.render_resize_handle_v(ResizeDrag::FileList {
-                        start_x: 0.0,
-                        initial_width: self.file_list_width,
-                    }, cx))
+                    this.child(self.render_resize_handle_v(
+                        ResizeDrag::FileList {
+                            start_x: 0.0,
+                            initial_width: self.file_list_width,
+                        },
+                        cx,
+                    ))
                     .child(self.render_file_list(cx))
                 },
             )
     }
 
-    pub(crate) fn render_resize_handle_v(&self, drag_variant: ResizeDrag, cx: &Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_resize_handle_v(
+        &self,
+        drag_variant: ResizeDrag,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let initial = drag_variant;
         div()
             .id(match initial {
@@ -488,15 +536,24 @@ impl SashikiApp {
             None => return,
         };
         match drag {
-            ResizeDrag::Sidebar { start_x, initial_width } => {
+            ResizeDrag::Sidebar {
+                start_x,
+                initial_width,
+            } => {
                 let new_width = (initial_width + (current_x - start_x)).clamp(120.0, 500.0);
                 self.sidebar_width = new_width;
             }
-            ResizeDrag::FileViewTerminal { start_y, initial_height } => {
+            ResizeDrag::FileViewTerminal {
+                start_y,
+                initial_height,
+            } => {
                 let new_height = (initial_height + (current_y - start_y)).clamp(100.0, 800.0);
                 self.file_view_height = new_height;
             }
-            ResizeDrag::TerminalSplit { start_x, initial_ratio } => {
+            ResizeDrag::TerminalSplit {
+                start_x,
+                initial_ratio,
+            } => {
                 let container_width = if initial_ratio > 0.0 {
                     (start_x - 0.0) / initial_ratio
                 } else {
@@ -507,7 +564,10 @@ impl SashikiApp {
                     self.terminal_split_ratio = (initial_ratio + ratio_delta).clamp(0.2, 0.8);
                 }
             }
-            ResizeDrag::FileList { start_x, initial_width } => {
+            ResizeDrag::FileList {
+                start_x,
+                initial_width,
+            } => {
                 let new_width = (initial_width - (current_x - start_x)).clamp(120.0, 500.0);
                 self.file_list_width = new_width;
             }
