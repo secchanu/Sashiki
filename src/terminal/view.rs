@@ -407,6 +407,11 @@ impl TerminalView {
         }
     }
 
+    /// Clear the current text selection
+    pub(super) fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
     // ========================================================================
     // Mouse handling
     // ========================================================================

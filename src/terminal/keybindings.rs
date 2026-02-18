@@ -326,8 +326,15 @@ impl TerminalView {
         self.write_to_terminal(b"\x02"); // STX - move left
     }
 
-    pub(super) fn on_ctrl_c(&mut self, _: &CtrlC, _: &mut Window, _: &mut Context<Self>) {
-        self.write_to_terminal(b"\x03"); // ETX - SIGINT
+    pub(super) fn on_ctrl_c(&mut self, _: &CtrlC, _: &mut Window, cx: &mut Context<Self>) {
+        // Copy selection if present, otherwise send SIGINT
+        if let Some(text) = self.get_selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.clear_selection();
+            cx.notify();
+        } else {
+            self.write_to_terminal(b"\x03");
+        }
     }
 
     pub(super) fn on_ctrl_d(&mut self, _: &CtrlD, _: &mut Window, _: &mut Context<Self>) {
@@ -402,8 +409,11 @@ impl TerminalView {
         self.write_to_terminal(b"\x15"); // NAK - kill line
     }
 
-    pub(super) fn on_ctrl_v(&mut self, _: &CtrlV, _: &mut Window, _: &mut Context<Self>) {
-        self.write_to_terminal(b"\x16"); // SYN - literal input
+    pub(super) fn on_ctrl_v(&mut self, _: &CtrlV, _window: &mut Window, cx: &mut Context<Self>) {
+        // Paste from clipboard (standard behavior for modern terminals on Windows)
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.write_to_terminal(text.as_bytes());
+        }
     }
 
     pub(super) fn on_ctrl_w(&mut self, _: &CtrlW, _: &mut Window, _: &mut Context<Self>) {
