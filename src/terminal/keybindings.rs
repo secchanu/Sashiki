@@ -3,7 +3,36 @@
 //! This module defines all keyboard actions for the terminal and their handlers.
 
 use super::TerminalView;
-use gpui::{App, ClipboardItem, Context, KeyBinding, Window, actions};
+use super::input_probe::{self, CtrlCProvenance};
+use alacritty_terminal::term::TermMode;
+use gpui::{
+    App, ClipboardItem, Context, KeyBinding, KeyDownEvent, KeyUpEvent, KeybindingKeystroke,
+    Keystroke, ModifiersChangedEvent, Window, actions,
+};
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+// Typeless-like synthetic Ctrl+C tends to press+release within a few ms.
+// Keep this tight so normal human Ctrl+C still interrupts quickly.
+const CTRL_C_RAPID_TAP_THRESHOLD: Duration = Duration::from_millis(30);
+const CTRL_C_PROVENANCE_MAX_AGE: Duration = Duration::from_millis(250);
+const INJECTED_PASTE_SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(1500);
+static CTRL_C_KEYBINDING: LazyLock<KeybindingKeystroke> = LazyLock::new(|| {
+    KeybindingKeystroke::from_keystroke(Keystroke::parse("ctrl-c").expect("valid ctrl-c keystroke"))
+});
+static CTRL_V_KEYBINDING: LazyLock<KeybindingKeystroke> = LazyLock::new(|| {
+    KeybindingKeystroke::from_keystroke(Keystroke::parse("ctrl-v").expect("valid ctrl-v keystroke"))
+});
+static SHIFT_INSERT_KEYBINDING: LazyLock<KeybindingKeystroke> = LazyLock::new(|| {
+    KeybindingKeystroke::from_keystroke(
+        Keystroke::parse("shift-insert").expect("valid shift-insert keystroke"),
+    )
+});
+static CTRL_SHIFT_V_KEYBINDING: LazyLock<KeybindingKeystroke> = LazyLock::new(|| {
+    KeybindingKeystroke::from_keystroke(
+        Keystroke::parse("ctrl-shift-v").expect("valid ctrl-shift-v keystroke"),
+    )
+});
 
 // Define actions for special keys
 actions!(
@@ -105,8 +134,168 @@ actions!(
 );
 
 impl TerminalView {
+    fn is_ctrl_c_keystroke(keystroke: &Keystroke) -> bool {
+        keystroke.should_match(&CTRL_C_KEYBINDING)
+    }
+
+    fn is_paste_keystroke(keystroke: &Keystroke) -> bool {
+        keystroke.should_match(&CTRL_V_KEYBINDING)
+            || keystroke.should_match(&SHIFT_INSERT_KEYBINDING)
+            || keystroke.should_match(&CTRL_SHIFT_V_KEYBINDING)
+    }
+
+    pub(super) fn cancel_pending_ctrl_c(&mut self) {
+        if let Some(pending) = self.pending_ctrl_c {
+            Self::trace_input_event(format!(
+                "cancel pending_ctrl_c age_ms={}",
+                pending.armed_at.elapsed().as_millis()
+            ));
+        }
+        self.pending_ctrl_c = None;
+        input_probe::end_automation_input_session();
+    }
+
+    fn flush_pending_ctrl_c(&mut self, reason: &'static str) {
+        if let Some(pending) = self.pending_ctrl_c.take() {
+            Self::trace_input_event(format!(
+                "flush pending_ctrl_c reason={} age_ms={}",
+                reason,
+                pending.armed_at.elapsed().as_millis()
+            ));
+            self.write_to_terminal(b"\x03");
+        }
+        input_probe::end_automation_input_session();
+    }
+
+    fn arm_pending_ctrl_c(&mut self) {
+        self.pending_ctrl_c = Some(super::view::PendingCtrlCState {
+            armed_at: Instant::now(),
+            rapid_tap_detected: false,
+            ctrl_c_released: false,
+        });
+    }
+
+    fn mark_pending_ctrl_c_as_automation(&mut self) {
+        let Some(mut pending) = self.pending_ctrl_c else {
+            return;
+        };
+        pending.rapid_tap_detected = true;
+        pending.ctrl_c_released = true;
+        self.pending_ctrl_c = Some(pending);
+        Self::trace_input_event(format!(
+            "mark pending_ctrl_c as automation age_ms={}",
+            pending.armed_at.elapsed().as_millis()
+        ));
+    }
+
+    pub(super) fn on_terminal_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        Self::trace_input_event(format!(
+            "keydown key={} key_char={:?} mods(c={} a={} s={} p={} f={}) pending={}",
+            event.keystroke.key,
+            event.keystroke.key_char,
+            event.keystroke.modifiers.control,
+            event.keystroke.modifiers.alt,
+            event.keystroke.modifiers.shift,
+            event.keystroke.modifiers.platform,
+            event.keystroke.modifiers.function,
+            self.pending_ctrl_c.is_some()
+        ));
+
+        if self.pending_ctrl_c.is_none() {
+            return;
+        }
+        if Self::is_ctrl_c_keystroke(&event.keystroke) || Self::is_paste_keystroke(&event.keystroke)
+        {
+            return;
+        }
+        if self
+            .pending_ctrl_c
+            .as_ref()
+            .is_some_and(|p| p.rapid_tap_detected)
+        {
+            self.cancel_pending_ctrl_c();
+        } else {
+            self.flush_pending_ctrl_c("other_keydown");
+        }
+    }
+
+    pub(super) fn on_terminal_key_up(
+        &mut self,
+        event: &KeyUpEvent,
+        _: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        Self::trace_input_event(format!(
+            "keyup key={} key_char={:?} mods(c={} a={} s={} p={} f={}) pending={}",
+            event.keystroke.key,
+            event.keystroke.key_char,
+            event.keystroke.modifiers.control,
+            event.keystroke.modifiers.alt,
+            event.keystroke.modifiers.shift,
+            event.keystroke.modifiers.platform,
+            event.keystroke.modifiers.function,
+            self.pending_ctrl_c.is_some()
+        ));
+
+        if let Some(pending) = self.pending_ctrl_c {
+            if Self::is_ctrl_c_keystroke(&event.keystroke) {
+                if pending.rapid_tap_detected {
+                    // Native probe or rapid-tap heuristic already classified this Ctrl+C
+                    // as automation. Keep pending until paste/commit cancels it.
+                    Self::trace_input_event("ctrl-c keyup while automation pending -> keep armed");
+                    return;
+                }
+
+                let age = pending.armed_at.elapsed();
+                if age <= CTRL_C_RAPID_TAP_THRESHOLD {
+                    Self::trace_input_event(format!(
+                        "ctrl-c rapid_tap detected age_ms={} threshold_ms={}",
+                        age.as_millis(),
+                        CTRL_C_RAPID_TAP_THRESHOLD.as_millis()
+                    ));
+                    self.mark_pending_ctrl_c_as_automation();
+                } else {
+                    self.flush_pending_ctrl_c("ctrl_c_keyup");
+                }
+            } else if !pending.rapid_tap_detected {
+                self.flush_pending_ctrl_c("other_keyup");
+            }
+        }
+    }
+
+    pub(super) fn on_terminal_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        Self::trace_input_event(format!(
+            "modifiers c={} a={} s={} p={} f={} pending={:?}",
+            event.modifiers.control,
+            event.modifiers.alt,
+            event.modifiers.shift,
+            event.modifiers.platform,
+            event.modifiers.function,
+            self.pending_ctrl_c
+        ));
+        if !event.modifiers.control
+            && self
+                .pending_ctrl_c
+                .is_some_and(|pending| !pending.rapid_tap_detected && !pending.ctrl_c_released)
+        {
+            self.flush_pending_ctrl_c("ctrl_released");
+        }
+    }
+
     /// Bind terminal key actions to the application
     pub fn bind_keys(cx: &mut App) {
+        input_probe::init_native_input_probe();
+
         cx.bind_keys([
             // Basic keys
             KeyBinding::new("enter", Enter, Some("Terminal")),
@@ -229,27 +418,51 @@ impl TerminalView {
     }
 
     pub(super) fn on_up(&mut self, _: &Up, _: &mut Window, _: &mut Context<Self>) {
-        self.write_to_terminal(b"\x1b[A");
+        if self.is_mode_set(TermMode::APP_CURSOR) {
+            self.write_to_terminal(b"\x1bOA");
+        } else {
+            self.write_to_terminal(b"\x1b[A");
+        }
     }
 
     pub(super) fn on_down(&mut self, _: &Down, _: &mut Window, _: &mut Context<Self>) {
-        self.write_to_terminal(b"\x1b[B");
+        if self.is_mode_set(TermMode::APP_CURSOR) {
+            self.write_to_terminal(b"\x1bOB");
+        } else {
+            self.write_to_terminal(b"\x1b[B");
+        }
     }
 
     pub(super) fn on_left(&mut self, _: &Left, _: &mut Window, _: &mut Context<Self>) {
-        self.write_to_terminal(b"\x1b[D");
+        if self.is_mode_set(TermMode::APP_CURSOR) {
+            self.write_to_terminal(b"\x1bOD");
+        } else {
+            self.write_to_terminal(b"\x1b[D");
+        }
     }
 
     pub(super) fn on_right(&mut self, _: &Right, _: &mut Window, _: &mut Context<Self>) {
-        self.write_to_terminal(b"\x1b[C");
+        if self.is_mode_set(TermMode::APP_CURSOR) {
+            self.write_to_terminal(b"\x1bOC");
+        } else {
+            self.write_to_terminal(b"\x1b[C");
+        }
     }
 
     pub(super) fn on_home(&mut self, _: &Home, _: &mut Window, _: &mut Context<Self>) {
-        self.write_to_terminal(b"\x1b[H");
+        if self.is_mode_set(TermMode::APP_CURSOR) {
+            self.write_to_terminal(b"\x1bOH");
+        } else {
+            self.write_to_terminal(b"\x1b[H");
+        }
     }
 
     pub(super) fn on_end(&mut self, _: &End, _: &mut Window, _: &mut Context<Self>) {
-        self.write_to_terminal(b"\x1b[F");
+        if self.is_mode_set(TermMode::APP_CURSOR) {
+            self.write_to_terminal(b"\x1bOF");
+        } else {
+            self.write_to_terminal(b"\x1b[F");
+        }
     }
 
     pub(super) fn on_delete(&mut self, _: &Delete, _: &mut Window, _: &mut Context<Self>) {
@@ -327,13 +540,43 @@ impl TerminalView {
     }
 
     pub(super) fn on_ctrl_c(&mut self, _: &CtrlC, _: &mut Window, cx: &mut Context<Self>) {
-        // Copy selection if present, otherwise send SIGINT
+        // Copy selection if present. Without selection, resolve Ctrl+C intent:
+        // either SIGINT (normal terminal behavior) or "cancel-before-paste"
+        // sequence used by automation/voice input tools.
         if let Some(text) = self.get_selected_text() {
+            Self::trace_input_event("action ctrl-c -> copy selection");
+            self.cancel_pending_ctrl_c();
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             self.clear_selection();
             cx.notify();
         } else {
-            self.write_to_terminal(b"\x03");
+            match input_probe::recent_ctrl_c_provenance(CTRL_C_PROVENANCE_MAX_AGE) {
+                CtrlCProvenance::Hardware => {
+                    Self::trace_input_event("action ctrl-c -> SIGINT (native-hardware)");
+                    self.cancel_pending_ctrl_c();
+                    self.write_to_terminal(b"\x03");
+                    return;
+                }
+                CtrlCProvenance::Injected => {
+                    Self::trace_input_event("action ctrl-c -> arm pending (native-injected)");
+                    if self.pending_ctrl_c.is_none() {
+                        self.arm_pending_ctrl_c();
+                    }
+                    input_probe::begin_automation_input_session();
+                    self.mark_pending_ctrl_c_as_automation();
+                    return;
+                }
+                CtrlCProvenance::Unknown => {}
+            }
+
+            // Repeated Ctrl+C should interrupt immediately.
+            if self.pending_ctrl_c.is_some() {
+                Self::trace_input_event("action ctrl-c -> flush pending to SIGINT");
+                self.flush_pending_ctrl_c("ctrl_c_repeated");
+            } else {
+                Self::trace_input_event("action ctrl-c -> arm pending");
+                self.arm_pending_ctrl_c();
+            }
         }
     }
 
@@ -409,10 +652,40 @@ impl TerminalView {
         self.write_to_terminal(b"\x15"); // NAK - kill line
     }
 
-    pub(super) fn on_ctrl_v(&mut self, _: &CtrlV, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_ctrl_v(&mut self, _: &CtrlV, window: &mut Window, cx: &mut Context<Self>) {
         // Paste from clipboard (standard behavior for modern terminals on Windows)
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.write_to_terminal(text.as_bytes());
+        let automation_paste = self
+            .pending_ctrl_c
+            .as_ref()
+            .is_some_and(|pending| pending.rapid_tap_detected);
+        if automation_paste {
+            // Drive a native WM_PASTE path on the mirror edit so automation
+            // tools can validate "paste accepted" via their expected probes.
+            input_probe::synthesize_automation_paste_probe();
+        }
+
+        let mut source = "clipboard";
+        let text = if automation_paste {
+            if let Some(snapshot) =
+                input_probe::recent_injected_paste_text(INJECTED_PASTE_SNAPSHOT_MAX_AGE)
+            {
+                source = "native_snapshot";
+                Some(snapshot)
+            } else {
+                cx.read_from_clipboard().and_then(|item| item.text())
+            }
+        } else {
+            cx.read_from_clipboard().and_then(|item| item.text())
+        };
+
+        if let Some(text) = text {
+            Self::trace_input_event(format!(
+                "action ctrl-v -> paste len={} source={}",
+                text.len(),
+                source
+            ));
+            self.paste_text(&text);
+            window.invalidate_character_coordinates();
         }
     }
 
@@ -531,12 +804,14 @@ impl TerminalView {
     pub(super) fn on_shift_insert(
         &mut self,
         _: &ShiftInsert,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Paste from clipboard
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.write_to_terminal(text.as_bytes());
+            Self::trace_input_event(format!("action shift-insert -> paste len={}", text.len()));
+            self.paste_text(&text);
+            window.invalidate_character_coordinates();
         }
     }
 
@@ -643,12 +918,14 @@ impl TerminalView {
     pub(super) fn on_ctrl_shift_v(
         &mut self,
         _: &CtrlShiftV,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Paste from clipboard
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.write_to_terminal(text.as_bytes());
+            Self::trace_input_event(format!("action ctrl-shift-v -> paste len={}", text.len()));
+            self.paste_text(&text);
+            window.invalidate_character_coordinates();
         }
     }
 

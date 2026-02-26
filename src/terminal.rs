@@ -8,6 +8,7 @@
 //! - `element`: TerminalElement for custom GPUI rendering
 
 mod element;
+mod input_probe;
 mod keybindings;
 mod view;
 
@@ -18,7 +19,7 @@ use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::tty;
 use std::sync::Arc;
 
@@ -40,7 +41,9 @@ impl EventListener for TerminalEventListener {
             AlacEvent::Wakeup => TerminalEvent::Wakeup,
             AlacEvent::Bell => TerminalEvent::Bell,
             AlacEvent::Exit => TerminalEvent::Exit,
-            AlacEvent::Title(_) => TerminalEvent::Title,
+            AlacEvent::Title(title) => TerminalEvent::Title(title),
+            AlacEvent::ClipboardStore(_, text) => TerminalEvent::ClipboardStore(text),
+            AlacEvent::ClipboardLoad(_, formatter) => TerminalEvent::ClipboardLoad(formatter),
             _ => return,
         };
         // Ignore send failure - channel full or receiver dropped is non-fatal
@@ -48,12 +51,27 @@ impl EventListener for TerminalEventListener {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TerminalEvent {
     Wakeup,
     Bell,
     Exit,
-    Title,
+    Title(String),
+    ClipboardStore(String),
+    ClipboardLoad(Arc<dyn Fn(&str) -> String + Sync + Send + 'static>),
+}
+
+impl std::fmt::Debug for TerminalEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Wakeup => f.write_str("Wakeup"),
+            Self::Bell => f.write_str("Bell"),
+            Self::Exit => f.write_str("Exit"),
+            Self::Title(title) => f.debug_tuple("Title").field(title).finish(),
+            Self::ClipboardStore(text) => f.debug_tuple("ClipboardStore").field(text).finish(),
+            Self::ClipboardLoad(_) => f.write_str("ClipboardLoad(<formatter>)"),
+        }
+    }
 }
 
 impl Terminal {
@@ -110,6 +128,11 @@ impl Terminal {
 
     pub fn write(&self, input: &[u8]) {
         self.pty_tx.notify(input.to_vec());
+    }
+
+    pub fn mode(&self) -> TermMode {
+        let term = self.term.lock();
+        *term.mode()
     }
 
     /// Send exit command to the shell to terminate the PTY process

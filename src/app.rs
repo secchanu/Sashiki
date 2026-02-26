@@ -11,7 +11,9 @@ use crate::lsp::LspManager;
 use crate::session::SessionManager;
 use crate::template::TemplateConfig;
 use crate::terminal::TerminalView;
-use crate::ui::{FileListMode, FileTreeNode, FileView, GotoDefinitionEvent};
+use crate::ui::{
+    ChangeSection, FileListMode, FileView, GotoDefinitionEvent, StageSelectionEvent,
+};
 use async_lock::Mutex as AsyncMutex;
 use gpui::{AppContext, Context, Entity, FocusHandle};
 use std::collections::HashSet;
@@ -42,8 +44,17 @@ pub struct SashikiApp {
     pub(crate) session_manager: SessionManager,
     pub(crate) changed_files: Vec<crate::git::ChangedFile>,
     pub(crate) file_list_mode: FileListMode,
+    /// 展開ディレクトリ (Files タブ用)
     pub(crate) expanded_dirs: HashSet<PathBuf>,
-    pub(crate) file_tree: Option<FileTreeNode>,
+    /// Changes タブのツリービュー用: セクション別展開状態
+    pub(crate) staged_expanded_dirs: HashSet<PathBuf>,
+    pub(crate) unstaged_expanded_dirs: HashSet<PathBuf>,
+    pub(crate) selected_file_path: Option<PathBuf>,
+    pub(crate) selected_file_section: Option<ChangeSection>,
+    pub(crate) hovered_file_path: Option<PathBuf>,
+    pub(crate) hovered_file_section: Option<ChangeSection>,
+    pub(crate) staged_section_collapsed: bool,
+    pub(crate) unstaged_section_collapsed: bool,
     pub(crate) file_view: Entity<FileView>,
     pub(crate) language_registry: LanguageRegistry,
     pub(crate) git_repo: Option<GitRepo>,
@@ -54,8 +65,15 @@ pub struct SashikiApp {
     pub(crate) show_file_view: bool,
     pub(crate) active_dialog: ActiveDialog,
     pub(crate) create_branch_input: String,
+    pub(crate) commit_message_input: String,
+    /// true when the commit dialog is being used to amend the last commit
+    pub(crate) commit_amend_mode: bool,
+    pub(crate) stash_message_input: String,
+    pub(crate) stash_entries: Vec<crate::git::StashEntry>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) create_dialog_focus: FocusHandle,
+    pub(crate) commit_dialog_focus: FocusHandle,
+    pub(crate) stash_dialog_focus: FocusHandle,
     /// Template config being edited in the settings dialog
     pub(crate) template_edit: Option<TemplateConfig>,
     /// Input fields for template settings dialog (one per section, newline-delimited)
@@ -75,12 +93,26 @@ pub struct SashikiApp {
     pub(crate) file_list_width: f32,
     pub(crate) resize_drag: Option<ResizeDrag>,
     pub(crate) lsp_manager: Arc<AsyncMutex<LspManager>>,
+    /// Whether the source control changes list uses tree view (true) or flat list (false)
+    pub(crate) changes_view_is_tree: bool,
+    /// Pending hunk/range discard event, held while DiscardHunkConfirm dialog is shown.
+    pub(crate) pending_discard_hunk: Option<StageSelectionEvent>,
+    /// Whether the commit split-button dropdown is open.
+    pub(crate) commit_dropdown_open: bool,
+    /// Scope of changes to include when pushing a new stash.
+    pub(crate) stash_mode: crate::git::StashMode,
+    /// Files changed in each stash entry, keyed by stash reference. Loaded on dialog open.
+    pub(crate) stash_entry_files: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Stash entries currently expanded to show their file list.
+    pub(crate) stash_expanded_entries: std::collections::HashSet<String>,
 }
 
 impl SashikiApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let create_dialog_focus = cx.focus_handle();
+        let commit_dialog_focus = cx.focus_handle();
+        let stash_dialog_focus = cx.focus_handle();
         let file_view = cx.new(FileView::new);
 
         // Subscribe to SendToTerminalEvent from FileView
@@ -95,6 +127,12 @@ impl SashikiApp {
         // Subscribe to GotoDefinitionEvent from FileView
         cx.subscribe(&file_view, |this, _, event: &GotoDefinitionEvent, cx| {
             this.handle_goto_definition(event.clone(), cx);
+        })
+        .detach();
+
+        // Subscribe to staging requests from FileView (hunk/range staging)
+        cx.subscribe(&file_view, |this, _, event: &StageSelectionEvent, cx| {
+            this.handle_stage_selection(event.clone(), cx);
         })
         .detach();
 
@@ -133,7 +171,14 @@ impl SashikiApp {
             changed_files: Vec::new(),
             file_list_mode: FileListMode::default(),
             expanded_dirs: HashSet::new(),
-            file_tree: None,
+            staged_expanded_dirs: HashSet::new(),
+            unstaged_expanded_dirs: HashSet::new(),
+            selected_file_path: None,
+            selected_file_section: None,
+            hovered_file_path: None,
+            hovered_file_section: None,
+            staged_section_collapsed: false,
+            unstaged_section_collapsed: false,
             file_view,
             language_registry: LanguageRegistry::new(),
             git_repo,
@@ -143,8 +188,14 @@ impl SashikiApp {
             show_file_view: false,
             active_dialog,
             create_branch_input: String::new(),
+            commit_message_input: String::new(),
+            commit_amend_mode: false,
+            stash_message_input: String::new(),
+            stash_entries: Vec::new(),
             focus_handle,
             create_dialog_focus,
+            commit_dialog_focus,
+            stash_dialog_focus,
             template_edit: None,
             settings_inputs: Default::default(),
             settings_cursors: Default::default(),
@@ -155,13 +206,18 @@ impl SashikiApp {
             sidebar_width: 224.0,
             file_view_height: 384.0,
             terminal_split_ratio: 0.5,
-            file_list_width: 256.0,
+            file_list_width: 308.0,
             resize_drag: None,
             lsp_manager: Arc::new(AsyncMutex::new(LspManager::new())),
+            changes_view_is_tree: true,
+            pending_discard_hunk: None,
+            commit_dropdown_open: false,
+            stash_mode: crate::git::StashMode::default(),
+            stash_entry_files: std::collections::HashMap::new(),
+            stash_expanded_entries: std::collections::HashSet::new(),
         };
 
         app.refresh_changed_files_sync();
-        app.build_file_tree();
         app
     }
 
@@ -239,10 +295,23 @@ impl SashikiApp {
         self.cached_worktree = None;
         self.changed_files.clear();
         self.expanded_dirs.clear();
-        self.file_tree = None;
+        self.staged_expanded_dirs.clear();
+        self.unstaged_expanded_dirs.clear();
+        self.selected_file_path = None;
+        self.selected_file_section = None;
+        self.hovered_file_path = None;
+        self.hovered_file_section = None;
+        self.staged_section_collapsed = false;
+        self.unstaged_section_collapsed = false;
         self.active_dialog = ActiveDialog::None;
         self.open_menu = None;
         self.create_branch_input.clear();
+        self.commit_message_input.clear();
+        self.stash_message_input.clear();
+        self.stash_entries.clear();
+        self.stash_entry_files.clear();
+        self.stash_expanded_entries.clear();
+        self.stash_mode = crate::git::StashMode::default();
 
         // 5. Initialize repository and sessions for the selected project.
         self.git_repo = Some(repo);
@@ -261,7 +330,6 @@ impl SashikiApp {
 
         // 8. Refresh file list
         self.refresh_changed_files_sync();
-        self.build_file_tree();
 
         cx.notify();
     }

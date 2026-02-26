@@ -1,7 +1,9 @@
 //! File view component for viewing files and diffs
 
+use crate::git::ChangeType;
 use crate::highlight::{HighlightedDoc, HighlightedLine};
 use crate::theme::*;
+use crate::ui::ChangeSection;
 use gpui::{
     AnyElement, App, Context, DefiniteLength, EventEmitter, FocusHandle, Focusable,
     InteractiveText, IntoElement, MouseButton, ParentElement, Render, ScrollHandle, Styled,
@@ -21,6 +23,28 @@ pub struct GotoDefinitionEvent {
     pub file_path: PathBuf,
     pub line: u32,
     pub character: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum StageSelectionKind {
+    HunkAtLine(usize),
+    LineRange { start: usize, end: usize },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SelectionAction {
+    Stage,
+    Unstage,
+    Discard,
+}
+
+/// Event to request staging a selected hunk or line range.
+#[derive(Debug, Clone)]
+pub struct StageSelectionEvent {
+    pub file_path: PathBuf,
+    pub section: ChangeSection,
+    pub action: SelectionAction,
+    pub kind: StageSelectionKind,
 }
 
 /// View mode for the file view
@@ -85,6 +109,10 @@ pub struct FileView {
     focus_handle: FocusHandle,
     /// Rc-wrapped for cheap clones during render
     cached_added_lines: Rc<std::collections::HashSet<usize>>,
+    /// Rc-wrapped hunk start line numbers (new-file side, 1-based)
+    cached_hunk_start_lines: Rc<std::collections::HashSet<usize>>,
+    /// Rc-wrapped hunk ranges (new-file side, 1-based inclusive)
+    cached_hunk_ranges: Rc<Vec<(usize, usize)>>,
     /// Rc-wrapped for cheap clones during render (Before/left side)
     cached_left_lines: Rc<Vec<SplitDiffLine>>,
     /// Rc-wrapped for cheap clones during render (After/right side)
@@ -99,6 +127,14 @@ pub struct FileView {
     inline_scroll_handle: ScrollHandle,
     /// Target line to scroll to after opening a file (1-based)
     target_line: Option<usize>,
+    current_change_section: Option<ChangeSection>,
+    /// Change type of the currently displayed file (used to suppress hunk buttons for untracked files)
+    current_change_type: Option<ChangeType>,
+    /// Current hovered line number in diff views (new-file side, 1-based)
+    hovered_line: Option<usize>,
+    /// Selection anchor/focus line numbers for range staging in diff views (1-based).
+    selected_line_anchor: Option<usize>,
+    selected_line_focus: Option<usize>,
     diff_split_ratio: f32,
     diff_resize_drag: Option<DiffResizeDrag>,
 }
@@ -116,6 +152,8 @@ impl FileView {
             mode: FileViewMode::Content,
             focus_handle: cx.focus_handle(),
             cached_added_lines: Rc::new(std::collections::HashSet::new()),
+            cached_hunk_start_lines: Rc::new(std::collections::HashSet::new()),
+            cached_hunk_ranges: Rc::new(Vec::new()),
             cached_left_lines: Rc::new(Vec::new()),
             cached_right_lines: Rc::new(Vec::new()),
             cached_inline_lines: Rc::new(Vec::new()),
@@ -123,6 +161,11 @@ impl FileView {
             content_scroll_handle: ScrollHandle::new(),
             inline_scroll_handle: ScrollHandle::new(),
             target_line: None,
+            current_change_section: None,
+            current_change_type: None,
+            hovered_line: None,
+            selected_line_anchor: None,
+            selected_line_focus: None,
             diff_split_ratio: 0.5,
             diff_resize_drag: None,
         }
@@ -130,6 +173,14 @@ impl FileView {
 
     pub fn mode(&self) -> FileViewMode {
         self.mode
+    }
+
+    pub fn set_change_section(&mut self, section: Option<ChangeSection>) {
+        self.current_change_section = section;
+    }
+
+    pub fn set_change_type(&mut self, change_type: Option<ChangeType>) {
+        self.current_change_type = change_type;
     }
 
     pub fn set_target_line(&mut self, line: usize) {
@@ -256,10 +307,14 @@ impl FileView {
         self.highlight_old = None;
         self.highlight_new = None;
         self.target_line = None;
+        self.hovered_line = None;
+        self.clear_line_selection();
     }
 
     fn clear_diff_cache(&mut self) {
         self.cached_added_lines = Rc::new(std::collections::HashSet::new());
+        self.cached_hunk_start_lines = Rc::new(std::collections::HashSet::new());
+        self.cached_hunk_ranges = Rc::new(Vec::new());
         self.cached_left_lines = Rc::new(Vec::new());
         self.cached_right_lines = Rc::new(Vec::new());
         self.cached_inline_lines = Rc::new(Vec::new());
@@ -267,6 +322,8 @@ impl FileView {
 
     fn update_diff_cache(&mut self) {
         self.cached_added_lines = Rc::new(self.compute_added_line_numbers());
+        self.cached_hunk_start_lines = Rc::new(self.compute_hunk_start_lines());
+        self.cached_hunk_ranges = Rc::new(self.compute_hunk_ranges());
         let (left, right) = self.compute_split_diff();
         self.cached_left_lines = Rc::new(left);
         self.cached_right_lines = Rc::new(right);
@@ -290,10 +347,114 @@ impl FileView {
         )
     }
 
+    fn clear_line_selection(&mut self) {
+        self.selected_line_anchor = None;
+        self.selected_line_focus = None;
+    }
+
+    fn select_diff_line(&mut self, line: usize, extend_selection: bool) {
+        if extend_selection {
+            if self.selected_line_anchor.is_none() {
+                self.selected_line_anchor = Some(line);
+            }
+            self.selected_line_focus = Some(line);
+        } else {
+            self.selected_line_anchor = Some(line);
+            self.selected_line_focus = Some(line);
+        }
+    }
+
+    fn selected_line_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.selected_line_anchor?;
+        let focus = self.selected_line_focus.unwrap_or(anchor);
+        Some(if anchor <= focus {
+            (anchor, focus)
+        } else {
+            (focus, anchor)
+        })
+    }
+
+    fn selected_focus_line(&self) -> Option<usize> {
+        self.selected_line_focus.or(self.selected_line_anchor)
+    }
+
+    fn is_line_selected(&self, line: usize) -> bool {
+        self.selected_line_range()
+            .is_some_and(|(start, end)| line >= start && line <= end)
+    }
+
+    fn request_stage_hunk(&mut self, line: usize, cx: &mut Context<Self>) {
+        if let (Some(path), Some(section)) = (self.file_path.clone(), self.current_change_section) {
+            cx.emit(StageSelectionEvent {
+                file_path: path,
+                section,
+                action: SelectionAction::Stage,
+                kind: StageSelectionKind::HunkAtLine(line),
+            });
+        }
+    }
+
+    fn request_stage_range(&mut self, start: usize, end: usize, cx: &mut Context<Self>) {
+        if let (Some(path), Some(section)) = (self.file_path.clone(), self.current_change_section) {
+            cx.emit(StageSelectionEvent {
+                file_path: path,
+                section,
+                action: SelectionAction::Stage,
+                kind: StageSelectionKind::LineRange { start, end },
+            });
+        }
+    }
+
+    fn request_unstage_hunk(&mut self, line: usize, cx: &mut Context<Self>) {
+        if let (Some(path), Some(section)) = (self.file_path.clone(), self.current_change_section) {
+            cx.emit(StageSelectionEvent {
+                file_path: path,
+                section,
+                action: SelectionAction::Unstage,
+                kind: StageSelectionKind::HunkAtLine(line),
+            });
+        }
+    }
+
+    fn request_unstage_range(&mut self, start: usize, end: usize, cx: &mut Context<Self>) {
+        if let (Some(path), Some(section)) = (self.file_path.clone(), self.current_change_section) {
+            cx.emit(StageSelectionEvent {
+                file_path: path,
+                section,
+                action: SelectionAction::Unstage,
+                kind: StageSelectionKind::LineRange { start, end },
+            });
+        }
+    }
+
+    fn request_discard_hunk(&mut self, line: usize, cx: &mut Context<Self>) {
+        if let (Some(path), Some(section)) = (self.file_path.clone(), self.current_change_section) {
+            cx.emit(StageSelectionEvent {
+                file_path: path,
+                section,
+                action: SelectionAction::Discard,
+                kind: StageSelectionKind::HunkAtLine(line),
+            });
+        }
+    }
+
+    fn request_discard_range(&mut self, start: usize, end: usize, cx: &mut Context<Self>) {
+        if let (Some(path), Some(section)) = (self.file_path.clone(), self.current_change_section) {
+            cx.emit(StageSelectionEvent {
+                file_path: path,
+                section,
+                action: SelectionAction::Discard,
+                kind: StageSelectionKind::LineRange { start, end },
+            });
+        }
+    }
+
     pub fn close(&mut self) {
         self.file_path = None;
         self.content.clear();
         self.diff_content = None;
+        self.current_change_section = None;
+        self.current_change_type = None;
         self.clear_highlight_state();
         self.mode = FileViewMode::Content;
         self.clear_diff_cache();
@@ -486,6 +647,26 @@ impl FileView {
         }
     }
 
+    fn parse_hunk_header_with_counts(line: &str) -> Option<(usize, usize, usize, usize)> {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            return None;
+        }
+
+        let old_part = parts[1].trim_start_matches('-');
+        let new_part = parts[2].trim_start_matches('+');
+
+        let mut old_iter = old_part.split(',');
+        let mut new_iter = new_part.split(',');
+
+        let old_start = old_iter.next()?.parse().ok()?;
+        let old_count = old_iter.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let new_start = new_iter.next()?.parse().ok()?;
+        let new_count = new_iter.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+
+        Some((old_start, old_count, new_start, new_count))
+    }
+
     fn compute_added_line_numbers(&self) -> std::collections::HashSet<usize> {
         let diff = self.diff_content.as_deref().unwrap_or("");
         let mut added_lines = std::collections::HashSet::new();
@@ -507,6 +688,45 @@ impl FileView {
         }
 
         added_lines
+    }
+
+    fn compute_hunk_start_lines(&self) -> std::collections::HashSet<usize> {
+        let diff = self.diff_content.as_deref().unwrap_or("");
+        let mut starts = std::collections::HashSet::new();
+        for line in diff.lines() {
+            if line.starts_with("@@")
+                && let Some((_, new_start)) = Self::parse_hunk_header(line)
+            {
+                starts.insert(new_start);
+            }
+        }
+        starts
+    }
+
+    fn compute_hunk_ranges(&self) -> Vec<(usize, usize)> {
+        let diff = self.diff_content.as_deref().unwrap_or("");
+        let mut ranges = Vec::new();
+
+        for line in diff.lines() {
+            if line.starts_with("@@")
+                && let Some((_, _, new_start, new_count)) = Self::parse_hunk_header_with_counts(line)
+            {
+                let new_end = if new_count == 0 {
+                    new_start
+                } else {
+                    new_start + new_count.saturating_sub(1)
+                };
+                ranges.push((new_start, new_end));
+            }
+        }
+
+        ranges
+    }
+
+    fn hunk_idx_for_line(&self, line: usize) -> Option<usize> {
+        self.cached_hunk_ranges
+            .iter()
+            .position(|(start, end)| line >= *start && line <= *end)
     }
 
     fn highlighted_line_for_number<'a>(
@@ -758,6 +978,11 @@ impl FileView {
         let file_path = self.file_path.clone();
         let highlight_new = self.highlight_new.as_deref();
         let highlight_old = self.highlight_old.as_deref();
+        let selected_range = self
+            .selected_line_range()
+            .filter(|(start, end)| start != end);
+        let section = self.current_change_section;
+        let hovered_hunk_idx = self.hovered_line.and_then(|h| self.hunk_idx_for_line(h));
 
         if let Some(target) = self.target_line.take() {
             if let Some(ix) = lines.iter().position(|l| l.line_num == Some(target)) {
@@ -786,8 +1011,8 @@ impl FileView {
 
                 let line_num_str = line
                     .line_num
-                    .map(|n| format!("{:>4}", n))
-                    .unwrap_or_else(|| "    ".to_string());
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
 
                 let prefix = match line.change_type {
                     InlineChangeType::Added => "+",
@@ -797,24 +1022,79 @@ impl FileView {
 
                 let path_for_click = file_path.clone();
                 let line_num_for_click = line.line_num;
+                let is_selected_line = line_num_for_click.is_some_and(|n| self.is_line_selected(n));
+                let line_hunk_idx = line_num_for_click.and_then(|n| self.hunk_idx_for_line(n));
+                let is_hovered_hunk = line_hunk_idx
+                    .zip(hovered_hunk_idx)
+                    .is_some_and(|(a, b)| a == b);
+                let is_staged_section = matches!(section, Some(ChangeSection::Staged));
+                let is_unstaged_section = matches!(section, Some(ChangeSection::Unstaged));
+                let stage_line = line_num_for_click.unwrap_or(1);
+                // Untracked (Added) files use a synthetic diff; git diff is empty so hunk
+                // staging would silently fail — hide the hunk buttons for those files.
+                let is_untracked =
+                    matches!(self.current_change_type, Some(ChangeType::Added))
+                        && is_unstaged_section;
+                let can_show_stage =
+                    is_hovered_hunk && line_num_for_click.is_some() && !is_untracked;
+                let can_show_discard =
+                    is_hovered_hunk && is_unstaged_section && line_num_for_click.is_some()
+                        && !is_untracked;
+                let stage_symbol = if is_staged_section { "-" } else { "+" };
+                let gutter_strip_color = match line.change_type {
+                    InlineChangeType::Added => rgb(GREEN),
+                    InlineChangeType::Deleted => rgb(RED),
+                    InlineChangeType::Unchanged => rgb(BG_MANTLE),
+                };
 
                 div()
                     .flex()
                     .whitespace_nowrap()
                     .when_some(bg_color, |el, color| el.bg(color))
+                    .when(is_selected_line, |el| el.bg(rgb(BG_SURFACE2)))
                     .opacity(opacity)
+                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                        if this.hovered_line != line_num_for_click {
+                            this.hovered_line = line_num_for_click;
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .w(px(3.0))
+                            .h_full()
+                            .flex_shrink_0()
+                            .bg(gutter_strip_color),
+                    )
                     .child(
                         div()
                             .id(("inline-diff-line", idx))
-                            .w_12()
+                            .w(px(40.0))
                             .flex_shrink_0()
                             .text_right()
                             .pr_2()
-                            .bg(rgb(BG_MANTLE))
-                            .text_color(rgb(TEXT_MUTED))
+                            .bg(if is_selected_line {
+                                rgb(BG_SURFACE2)
+                            } else {
+                                rgb(BG_MANTLE)
+                            })
+                            .text_color(if is_selected_line {
+                                rgb(TEXT)
+                            } else {
+                                rgb(TEXT_MUTED)
+                            })
                             .when(line_num_for_click.is_some(), |el| {
                                 el.cursor_pointer().hover(|el| el.text_color(rgb(BLUE)))
                             })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                    if let Some(num) = line_num_for_click {
+                                        this.select_diff_line(num, event.modifiers.shift);
+                                        cx.notify();
+                                    }
+                                }),
+                            )
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener(move |_this, _, _, cx| {
@@ -830,8 +1110,61 @@ impl FileView {
                     )
                     .child(
                         div()
-                            .w_4()
+                            .id(("inline-stage-hunk", idx))
+                            .w(px(16.0))
                             .flex_shrink_0()
+                            .text_center()
+                            .text_xs()
+                            .text_color(if is_staged_section {
+                                rgb(BLUE)
+                            } else {
+                                rgb(GREEN)
+                            })
+                            .when(can_show_stage, |el| {
+                                el.cursor_pointer()
+                                    .hover(|d| d.bg(rgb(BG_SURFACE1)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some((start, end)) = selected_range {
+                                            if is_staged_section {
+                                                this.request_unstage_range(start, end, cx);
+                                            } else {
+                                                this.request_stage_range(start, end, cx);
+                                            }
+                                        } else if is_staged_section {
+                                            this.request_unstage_hunk(stage_line, cx);
+                                        } else {
+                                            this.request_stage_hunk(stage_line, cx);
+                                        }
+                                    }))
+                            })
+                            .child(if can_show_stage { stage_symbol } else { " " }),
+                    )
+                    .child(
+                        div()
+                            .id(("inline-discard-hunk", idx))
+                            .w(px(16.0))
+                            .flex_shrink_0()
+                            .text_center()
+                            .text_xs()
+                            .text_color(rgb(RED))
+                            .when(can_show_discard, |el| {
+                                el.cursor_pointer()
+                                    .hover(|d| d.bg(rgb(BG_SURFACE1)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some((start, end)) = selected_range {
+                                            this.request_discard_range(start, end, cx);
+                                        } else {
+                                            this.request_discard_hunk(stage_line, cx);
+                                        }
+                                    }))
+                            })
+                            .child(if can_show_discard { "x" } else { " " }),
+                    )
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .flex_shrink_0()
+                            .text_center()
                             .text_color(text_color)
                             .child(prefix),
                     )
@@ -1009,6 +1342,12 @@ impl FileView {
             DiffLineType::Context => (None, rgb(TEXT)),
         };
 
+        let gutter_strip_color = match line.line_type {
+            DiffLineType::Added => rgb(GREEN),
+            DiffLineType::Removed => rgb(RED),
+            DiffLineType::Context => rgb(BG_MANTLE),
+        };
+
         let line_num = if is_left {
             line.old_line_num
         } else {
@@ -1027,9 +1366,10 @@ impl FileView {
             .flex_row()
             .whitespace_nowrap()
             .when_some(bg_color, |el, color| el.bg(color))
+            .child(div().w(px(3.0)).flex_shrink_0().bg(gutter_strip_color))
             .child(
                 div()
-                    .w_10()
+                    .w(px(40.0))
                     .flex_shrink_0()
                     .text_right()
                     .pr_2()
@@ -1071,6 +1411,35 @@ impl FileView {
         };
 
         let line_num = line.new_line_num;
+        let is_selected_line = line_num.is_some_and(|n| self.is_line_selected(n));
+        let selected_range = self
+            .selected_line_range()
+            .filter(|(start, end)| start != end);
+        let hovered_hunk_idx = self.hovered_line.and_then(|h| self.hunk_idx_for_line(h));
+        let line_hunk_idx = line_num.and_then(|n| self.hunk_idx_for_line(n));
+        let is_hovered_hunk = line_hunk_idx
+            .zip(hovered_hunk_idx)
+            .is_some_and(|(a, b)| a == b);
+        let is_staged_section = matches!(self.current_change_section, Some(ChangeSection::Staged));
+        let is_unstaged_section =
+            matches!(self.current_change_section, Some(ChangeSection::Unstaged));
+        let stage_line = line_num.unwrap_or(1);
+        let is_untracked =
+            matches!(self.current_change_type, Some(ChangeType::Added)) && is_unstaged_section;
+        let can_show_stage = is_hovered_hunk && line_num.is_some() && !is_untracked;
+        let can_show_discard =
+            is_hovered_hunk && is_unstaged_section && line_num.is_some() && !is_untracked;
+        let stage_symbol = if is_staged_section { "-" } else { "+" };
+        let prefix = match line.line_type {
+            DiffLineType::Added => "+",
+            DiffLineType::Removed => "-",
+            DiffLineType::Context => " ",
+        };
+        let gutter_strip_color = match line.line_type {
+            DiffLineType::Added => rgb(GREEN),
+            DiffLineType::Removed => rgb(RED),
+            DiffLineType::Context => rgb(BG_MANTLE),
+        };
         let content = if line.content.is_empty() {
             " ".to_string()
         } else {
@@ -1083,15 +1452,109 @@ impl FileView {
             .flex_row()
             .whitespace_nowrap()
             .when_some(bg_color, |el, color| el.bg(color))
+            .when(is_selected_line, |el| el.bg(rgb(BG_SURFACE2)))
+            .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                if this.hovered_line != line_num {
+                    this.hovered_line = line_num;
+                    cx.notify();
+                }
+            }))
             .child(
                 div()
-                    .w_10()
+                    .w(px(3.0))
+                    .h_full()
+                    .flex_shrink_0()
+                    .bg(gutter_strip_color),
+            )
+            .child(
+                div()
+                    .w(px(40.0))
                     .flex_shrink_0()
                     .text_right()
                     .pr_2()
-                    .bg(rgb(BG_MANTLE))
-                    .text_color(rgb(TEXT_MUTED))
+                    .bg(if is_selected_line {
+                        rgb(BG_SURFACE2)
+                    } else {
+                        rgb(BG_MANTLE)
+                    })
+                    .text_color(if is_selected_line {
+                        rgb(TEXT)
+                    } else {
+                        rgb(TEXT_MUTED)
+                    })
+                    .when(line_num.is_some(), |el| {
+                        el.cursor_pointer().hover(|el| el.text_color(rgb(BLUE)))
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            if let Some(num) = line_num {
+                                this.select_diff_line(num, event.modifiers.shift);
+                                cx.notify();
+                            }
+                        }),
+                    )
                     .child(line_num.map(|n| n.to_string()).unwrap_or_default()),
+            )
+            .child(
+                div()
+                    .id(("split-stage-hunk", line_num.unwrap_or(0)))
+                    .w(px(16.0))
+                    .flex_shrink_0()
+                    .text_center()
+                    .text_xs()
+                    .text_color(if is_staged_section {
+                        rgb(BLUE)
+                    } else {
+                        rgb(GREEN)
+                    })
+                    .when(can_show_stage, |el| {
+                        el.cursor_pointer()
+                            .hover(|d| d.bg(rgb(BG_SURFACE1)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some((start, end)) = selected_range {
+                                    if is_staged_section {
+                                        this.request_unstage_range(start, end, cx);
+                                    } else {
+                                        this.request_stage_range(start, end, cx);
+                                    }
+                                } else if is_staged_section {
+                                    this.request_unstage_hunk(stage_line, cx);
+                                } else {
+                                    this.request_stage_hunk(stage_line, cx);
+                                }
+                            }))
+                    })
+                    .child(if can_show_stage { stage_symbol } else { " " }),
+            )
+            .child(
+                div()
+                    .id(("split-discard-hunk", line_num.unwrap_or(0)))
+                    .w(px(16.0))
+                    .flex_shrink_0()
+                    .text_center()
+                    .text_xs()
+                    .text_color(rgb(RED))
+                    .when(can_show_discard, |el| {
+                        el.cursor_pointer()
+                            .hover(|d| d.bg(rgb(BG_SURFACE1)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some((start, end)) = selected_range {
+                                    this.request_discard_range(start, end, cx);
+                                } else {
+                                    this.request_discard_hunk(stage_line, cx);
+                                }
+                            }))
+                    })
+                    .child(if can_show_discard { "x" } else { " " }),
+            )
+            .child(
+                div()
+                    .w(px(16.0))
+                    .flex_shrink_0()
+                    .text_center()
+                    .text_color(text_color)
+                    .child(prefix),
             )
             .child(
                 if let (Some(highlighted_line), Some(ln)) = (highlighted_line, line_num) {
@@ -1176,6 +1639,7 @@ impl Focusable for FileView {
 
 impl EventEmitter<SendToTerminalEvent> for FileView {}
 impl EventEmitter<GotoDefinitionEvent> for FileView {}
+impl EventEmitter<StageSelectionEvent> for FileView {}
 
 impl Render for FileView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

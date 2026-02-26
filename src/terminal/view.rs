@@ -3,6 +3,8 @@
 //! This module provides the main TerminalView struct and its implementation.
 
 use super::Terminal;
+use super::input_probe;
+use crate::terminal::TerminalEvent;
 use crate::terminal::element::{
     CellData, DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, MULTI_CLICK_THRESHOLD_MS,
     SCROLL_LINES_WHEEL, TERMINAL_PADDING, TerminalElement, TerminalLayout,
@@ -10,18 +12,19 @@ use crate::terminal::element::{
 use crate::theme::{self, *};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
-use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
+use alacritty_terminal::term::{TermMode, cell::Flags as CellFlags};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, AsyncApp, Bounds, Context, EntityInputHandler, FocusHandle, Focusable, Hsla,
-    InteractiveElement, IntoElement, MouseButton, MouseMoveEvent, ParentElement, Pixels, Render,
-    ScrollWheelEvent, Styled, UTF16Selection, WeakEntity, Window, div, rgb,
+    App, AsyncApp, Bounds, ClipboardItem, Context, EntityInputHandler, FocusHandle, Focusable,
+    Hsla, InteractiveElement, IntoElement, MouseButton, MouseMoveEvent, ParentElement, Pixels,
+    Point, Render, ScrollWheelEvent, Size, Styled, Subscription, UTF16Selection, WeakEntity,
+    Window, div, px, rgb,
 };
 use regex::Regex;
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 static URL_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"https?://[^\s\x00-\x1f\x7f<>"'\)\]]+"#).unwrap());
@@ -73,6 +76,8 @@ struct CachedContent {
     cells: Vec<Vec<CachedCell>>,
     /// Cursor position (line, column)
     cursor: (i32, usize),
+    /// Cursor shape as reported by terminal content
+    cursor_shape: CursorShape,
     /// Whether cursor should be visible (SHOW_CURSOR mode)
     cursor_visible: bool,
     /// Display offset for scrollback
@@ -88,6 +93,19 @@ struct TerminalSelection {
     start: (i32, usize),
     /// End point (line, column)
     end: (i32, usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PendingCtrlCState {
+    pub armed_at: Instant,
+    pub rapid_tap_detected: bool,
+    pub ctrl_c_released: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAccessibilityCommit {
+    text: String,
+    armed_at: Instant,
 }
 
 impl TerminalSelection {
@@ -126,6 +144,10 @@ pub struct TerminalView {
     pub(super) preedit_text: String,
     /// Error message if terminal creation failed
     error_message: Option<String>,
+    /// Window title set by terminal application (via OSC 2)
+    pub title: Option<String>,
+    /// Whether bell was recently triggered (for UI visual feedback)
+    pub bell_active: bool,
     /// Current text selection (if any)
     selection: Option<TerminalSelection>,
     /// Whether mouse is currently dragging for selection
@@ -146,9 +168,67 @@ pub struct TerminalView {
     pub(super) detected_urls: Vec<DetectedUrl>,
     /// Index of the URL currently hovered with Ctrl held
     pub(super) hovered_url_index: Option<usize>,
+    /// Pending Ctrl+C intent resolution.
+    /// Ctrl+C is held until we can disambiguate:
+    /// - normal manual Ctrl+C -> flush as SIGINT
+    /// - automation Ctrl+C->paste chain -> canceled by paste
+    pub(super) pending_ctrl_c: Option<PendingCtrlCState>,
+    /// Caret bounds for platform text-input integrations (IME/voice tools).
+    pub(super) input_cursor_bounds: Option<Bounds<Pixels>>,
+    /// Lightweight text shadow exposed through InputHandler APIs.
+    /// This is not terminal history; it only reflects recent committed input.
+    input_shadow_text: String,
+    /// Recently committed UTF-16 range in `input_shadow_text`.
+    /// Some automation tools query selected range to verify paste success.
+    recent_committed_range: Option<(Range<usize>, Instant)>,
+    /// Pending accessibility text commit to confirm against terminal output.
+    pending_accessibility_commit: Option<PendingAccessibilityCommit>,
+    /// Focus-in subscription (kept alive for focus reporting)
+    focus_in_subscription: Option<Subscription>,
+    /// Focus-out subscription (kept alive for focus reporting)
+    focus_out_subscription: Option<Subscription>,
 }
 
 impl TerminalView {
+    pub(super) fn input_trace_enabled() -> bool {
+        static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+            std::env::var("SASHIKI_TERMINAL_INPUT_TRACE")
+                .map(|v| v != "0")
+                .unwrap_or(false)
+        });
+        *ENABLED
+    }
+
+    fn input_trace_verbose_enabled() -> bool {
+        static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+            std::env::var("SASHIKI_TERMINAL_INPUT_TRACE_VERBOSE")
+                .map(|v| v != "0")
+                .unwrap_or(false)
+        });
+        *ENABLED
+    }
+
+    fn should_emit_input_trace(message: &str) -> bool {
+        if Self::input_trace_verbose_enabled() {
+            return true;
+        }
+        message.starts_with("action ctrl-c")
+            || message.starts_with("action ctrl-v")
+            || message.starts_with("paste_text called")
+            || message.starts_with("drop accessibility_commit timeout")
+    }
+
+    pub(super) fn trace_input_event(message: impl AsRef<str>) {
+        let message = message.as_ref();
+        if Self::input_trace_enabled() && Self::should_emit_input_trace(message) {
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            eprintln!("[terminal-input {ms}] {}", message);
+        }
+    }
+
     /// Create a new terminal with a specific working directory
     pub fn new_with_directory(
         working_directory: std::path::PathBuf,
@@ -168,17 +248,64 @@ impl TerminalView {
                 // This prevents catching intermediate states during rapid event sequences
                 cx.spawn(
                     async move |this: WeakEntity<TerminalView>, cx: &mut AsyncApp| {
-                        while let Ok(_event) = event_rx.recv().await {
-                            // Drain any additional pending events before updating
-                            // This ensures we process all events in a batch
-                            while event_rx.try_recv().is_ok() {}
+                        while let Ok(event) = event_rx.recv().await {
+                            // Collect all pending events first
+                            let mut events = vec![event];
+                            while let Ok(e) = event_rx.try_recv() {
+                                events.push(e);
+                            }
 
                             let should_break = cx.update(|cx| {
                                 if let Some(this) = this.upgrade() {
-                                    this.update(cx, |view, cx: &mut Context<TerminalView>| {
-                                        // Update content cache after all events processed
-                                        view.update_content_cache();
-                                        cx.notify();
+                                    this.update(cx, move |view, cx: &mut Context<TerminalView>| {
+                                        let mut need_notify = false;
+                                        let mut need_cache_refresh = false;
+
+                                        for event in events {
+                                            match event {
+                                                TerminalEvent::Wakeup => {
+                                                    need_cache_refresh = true;
+                                                    need_notify = true;
+                                                }
+                                                TerminalEvent::Bell => {
+                                                    view.bell_active = true;
+                                                    need_notify = true;
+                                                }
+                                                TerminalEvent::Exit => {
+                                                    // Terminal exited - handled elsewhere.
+                                                    need_cache_refresh = true;
+                                                    need_notify = true;
+                                                }
+                                                TerminalEvent::Title(title) => {
+                                                    view.title = Some(title);
+                                                    need_notify = true;
+                                                }
+                                                TerminalEvent::ClipboardStore(text) => {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(text),
+                                                    );
+                                                }
+                                                TerminalEvent::ClipboardLoad(formatter) => {
+                                                    if let Some(content) = cx
+                                                        .read_from_clipboard()
+                                                        .and_then(|c| c.text())
+                                                    {
+                                                        let response = formatter(&content);
+                                                        view.write_to_terminal(response.as_bytes());
+                                                    } else {
+                                                        let response = formatter("");
+                                                        view.write_to_terminal(response.as_bytes());
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if need_cache_refresh {
+                                            view.update_content_cache();
+                                        }
+                                        if need_notify {
+                                            cx.notify();
+                                        }
                                     });
                                     false
                                 } else {
@@ -198,6 +325,8 @@ impl TerminalView {
                     focus_handle,
                     preedit_text: String::new(),
                     error_message: None,
+                    title: None,
+                    bell_active: false,
                     selection: None,
                     is_dragging: false,
                     last_click_time: None,
@@ -208,6 +337,13 @@ impl TerminalView {
                     cached_content: None,
                     detected_urls: Vec::new(),
                     hovered_url_index: None,
+                    pending_ctrl_c: None,
+                    input_cursor_bounds: None,
+                    input_shadow_text: String::new(),
+                    recent_committed_range: None,
+                    pending_accessibility_commit: None,
+                    focus_in_subscription: None,
+                    focus_out_subscription: None,
                 };
                 // Capture initial terminal state so build_layout always has cached data
                 view.update_content_cache();
@@ -218,6 +354,8 @@ impl TerminalView {
                 focus_handle,
                 preedit_text: String::new(),
                 error_message: Some(format!("Failed to create terminal: {}", e)),
+                title: None,
+                bell_active: false,
                 selection: None,
                 is_dragging: false,
                 last_click_time: None,
@@ -228,6 +366,13 @@ impl TerminalView {
                 cached_content: None,
                 detected_urls: Vec::new(),
                 hovered_url_index: None,
+                pending_ctrl_c: None,
+                input_cursor_bounds: None,
+                input_shadow_text: String::new(),
+                recent_committed_range: None,
+                pending_accessibility_commit: None,
+                focus_in_subscription: None,
+                focus_out_subscription: None,
             },
         }
     }
@@ -251,6 +396,34 @@ impl TerminalView {
         }
     }
 
+    /// Paste text to terminal, wrapping with bracketed paste sequences if enabled.
+    /// Bracketed paste (DECSET 2004) lets the shell distinguish pasted text from typed text.
+    pub(super) fn paste_text(&mut self, text: &str) {
+        Self::trace_input_event(format!("paste_text called len={}", text.len()));
+        self.cancel_pending_ctrl_c();
+
+        if self.is_mode_set(TermMode::BRACKETED_PASTE) {
+            // Strip ESC from pasted content to prevent escape sequence injection.
+            let mut data = b"\x1b[200~".to_vec();
+            let sanitized = text.replace('\x1b', "");
+            data.extend_from_slice(sanitized.as_bytes());
+            data.extend_from_slice(b"\x1b[201~");
+            self.write_to_terminal(&data);
+            self.update_input_shadow_text(&sanitized);
+        } else {
+            self.write_to_terminal(text.as_bytes());
+            self.update_input_shadow_text(text);
+        }
+        self.arm_accessibility_commit(text);
+    }
+
+    pub(super) fn is_mode_set(&self, mode: TermMode) -> bool {
+        self.terminal
+            .as_ref()
+            .map(|t| t.mode().contains(mode))
+            .unwrap_or(false)
+    }
+
     /// Number of lines to scroll per page (Shift+PageUp/Down).
     /// Uses current screen height minus 1 (standard terminal behavior),
     /// falling back to 10 lines if terminal size is unknown.
@@ -272,6 +445,7 @@ impl TerminalView {
         terminal.with_term(|term| {
             let render_content = term.renderable_content();
             let cursor_point = render_content.cursor.point;
+            let cursor_shape = render_content.cursor.shape;
             let display_offset = render_content.display_offset as i32;
 
             let grid = term.grid();
@@ -296,13 +470,12 @@ impl TerminalView {
                 cells.push(row);
             }
 
-            let cursor_visible = term
-                .mode()
-                .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR);
+            let cursor_visible = term.mode().contains(TermMode::SHOW_CURSOR);
 
             self.cached_content = Some(CachedContent {
                 cells,
                 cursor: (cursor_point.line.0, cursor_point.column.0),
+                cursor_shape,
                 cursor_visible,
                 display_offset,
                 lines,
@@ -310,6 +483,129 @@ impl TerminalView {
         });
 
         self.detect_urls_from_cache();
+        self.resolve_pending_accessibility_commit();
+    }
+
+    fn arm_accessibility_commit(&mut self, text: &str) {
+        let sanitized: String = text
+            .chars()
+            .filter(|c| *c != '\0' && *c != '\x1b')
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if sanitized.is_empty() {
+            return;
+        }
+
+        Self::trace_input_event(format!(
+            "arm accessibility_commit len={} text_preview={:?}",
+            sanitized.chars().count(),
+            sanitized.chars().take(16).collect::<String>()
+        ));
+
+        self.pending_accessibility_commit = Some(PendingAccessibilityCommit {
+            text: sanitized.clone(),
+            armed_at: Instant::now(),
+        });
+        // Keep compatibility with clients that expect immediate accessibility updates,
+        // then send another notification once terminal output confirms the commit.
+        input_probe::notify_accessibility_text_committed(&sanitized);
+        Self::trace_input_event("accessibility_commit immediate notify");
+    }
+
+    fn resolve_pending_accessibility_commit(&mut self) {
+        const ACCESSIBILITY_COMMIT_TIMEOUT: Duration = Duration::from_secs(3);
+
+        let Some(pending) = self.pending_accessibility_commit.clone() else {
+            return;
+        };
+
+        if self.visible_text_contains(&pending.text) {
+            Self::trace_input_event(format!(
+                "confirm accessibility_commit age_ms={} len={}",
+                pending.armed_at.elapsed().as_millis(),
+                pending.text.chars().count()
+            ));
+            input_probe::notify_accessibility_text_committed(&pending.text);
+            self.pending_accessibility_commit = None;
+            return;
+        }
+
+        if pending.armed_at.elapsed() >= ACCESSIBILITY_COMMIT_TIMEOUT {
+            Self::trace_input_event(format!(
+                "drop accessibility_commit timeout age_ms={} len={}",
+                pending.armed_at.elapsed().as_millis(),
+                pending.text.chars().count()
+            ));
+            self.pending_accessibility_commit = None;
+        }
+    }
+
+    fn visible_text_contains(&self, needle: &str) -> bool {
+        let Some(cached) = self.cached_content.as_ref() else {
+            return false;
+        };
+        if needle.is_empty() {
+            return false;
+        }
+
+        cached.cells.iter().any(|row| {
+            let line: String = row
+                .iter()
+                // Skip NUL spacer cells used for wide chars (CJK), otherwise
+                // "こんにちは" becomes "こ ん に ち は" and commit detection fails.
+                .filter_map(|cell| (cell.c != '\0').then_some(cell.c))
+                .collect();
+            line.contains(needle)
+        })
+    }
+
+    fn update_input_shadow_text(&mut self, text: &str) {
+        let sanitized: String = text.chars().filter(|c| *c != '\0').collect();
+        self.input_shadow_text = sanitized;
+        let utf16_len = self.input_shadow_text.encode_utf16().count();
+        self.recent_committed_range = if utf16_len > 0 {
+            Some((0..utf16_len, Instant::now()))
+        } else {
+            None
+        };
+        Self::trace_input_event(format!("input_shadow_text updated utf16_len={utf16_len}"));
+    }
+
+    fn slice_utf16(text: &str, range: Range<usize>) -> String {
+        if text.is_empty() || range.start >= range.end {
+            return String::new();
+        }
+
+        let mut utf16_offset = 0usize;
+        let mut byte_start: Option<usize> = None;
+        let mut byte_end: Option<usize> = None;
+
+        for (idx, ch) in text.char_indices() {
+            let width = ch.len_utf16();
+            let next = utf16_offset + width;
+
+            if byte_start.is_none() && range.start <= utf16_offset {
+                byte_start = Some(idx);
+            }
+            if byte_end.is_none() && range.end <= utf16_offset {
+                byte_end = Some(idx);
+                break;
+            }
+            if byte_start.is_none() && range.start < next {
+                byte_start = Some(idx);
+            }
+            if byte_end.is_none() && range.end <= next {
+                byte_end = Some(idx + ch.len_utf8());
+                break;
+            }
+
+            utf16_offset = next;
+        }
+
+        let start = byte_start.unwrap_or(text.len());
+        let end = byte_end.unwrap_or(text.len()).max(start);
+        text[start..end].to_string()
     }
 
     /// Scan cached content for URLs using regex and record their screen positions.
@@ -412,6 +708,29 @@ impl TerminalView {
         self.selection = None;
     }
 
+    fn send_mouse_event_to_pty(&self, button: u8, col: usize, row: usize, press: bool) {
+        let col1 = col + 1;
+        let row1 = row + 1;
+        let seq = if self.is_mode_set(TermMode::SGR_MOUSE) {
+            let suffix = if press { 'M' } else { 'm' };
+            format!("\x1b[<{button};{col1};{row1}{suffix}")
+        } else {
+            // X10 mouse encoding: only works for col/row < 96 (byte would overflow readable range)
+            if col1 > 95 || row1 > 95 {
+                return;
+            }
+            let suffix = if press { 'M' } else { 'm' };
+            let _ = suffix; // X10 has no release
+            format!(
+                "\x1b[M{}{}{}",
+                (button + 32) as char,
+                (col1 as u8 + 32) as char,
+                (row1 as u8 + 32) as char
+            )
+        };
+        self.write_to_terminal(seq.as_bytes());
+    }
+
     // ========================================================================
     // Mouse handling
     // ========================================================================
@@ -453,6 +772,12 @@ impl TerminalView {
     /// Handle mouse down event for selection
     fn handle_mouse_down(&mut self, x: f32, y: f32, ctrl: bool, cx: &mut Context<Self>) {
         let (screen_line, col) = self.position_to_cell(x, y);
+
+        // If TUI app has mouse reporting enabled, forward the click to PTY.
+        if !ctrl && self.is_mode_set(TermMode::MOUSE_REPORT_CLICK) {
+            self.send_mouse_event_to_pty(0, col, screen_line as usize, true);
+            return;
+        }
 
         // Ctrl+click opens the URL under the cursor
         if ctrl && self.try_open_url_at(screen_line as usize, col) {
@@ -592,6 +917,14 @@ impl TerminalView {
 
     /// Handle mouse up event
     fn handle_mouse_up(&mut self, _cx: &mut Context<Self>) {
+        if self.is_mode_set(TermMode::MOUSE_REPORT_CLICK) {
+            // Release events are sent as button=3 in X10, or original button in SGR.
+            // Since we always used left button (0) for down, send release for button 0.
+            // We don't track the last pressed cell, so use cursor position as fallback for now.
+            self.is_dragging = false;
+            return;
+        }
+
         self.is_dragging = false;
 
         // Clear selection if it's just a single click (no actual range selected)
@@ -604,6 +937,44 @@ impl TerminalView {
 
     /// Handle scroll wheel event
     fn handle_scroll(&mut self, delta_y: f32, cx: &mut Context<Self>) {
+        let mouse_mode = self
+            .terminal
+            .as_ref()
+            .map(|t| t.mode().intersects(TermMode::MOUSE_MODE))
+            .unwrap_or(false);
+
+        if mouse_mode {
+            // Forward scroll to PTY as mouse button 64 (up) or 65 (down).
+            let button = if delta_y > 0.0 { 64u8 } else { 65u8 };
+            self.send_mouse_event_to_pty(button, 0, 0, true);
+            return;
+        }
+
+        let alt_screen = self
+            .terminal
+            .as_ref()
+            .map(|t| t.mode().contains(TermMode::ALT_SCREEN))
+            .unwrap_or(false);
+        let alt_scroll = self
+            .terminal
+            .as_ref()
+            .map(|t| t.mode().contains(TermMode::ALTERNATE_SCROLL))
+            .unwrap_or(false);
+
+        if alt_screen && alt_scroll {
+            // Send arrow keys instead of scrolling (for apps like less in alt screen).
+            let lines = SCROLL_LINES_WHEEL;
+            let key = if delta_y > 0.0 {
+                b"\x1b[A" as &[u8]
+            } else {
+                b"\x1b[B" as &[u8]
+            };
+            for _ in 0..lines {
+                self.write_to_terminal(key);
+            }
+            return;
+        }
+
         if let Some(ref terminal) = self.terminal {
             // GPUI scroll: positive delta_y = wheel up = scroll back in history
             // alacritty Scroll::Delta: positive = scroll up (show older content)
@@ -737,6 +1108,7 @@ impl TerminalView {
     ) -> TerminalLayout {
         let selection = self.selection;
         let (cursor_line, cursor_col) = cached.cursor;
+        let cursor_shape = cached.cursor_shape;
         let cursor_visible = cached.cursor_visible;
         let display_offset = cached.display_offset;
         let hovered_url_index = self.hovered_url_index;
@@ -821,8 +1193,50 @@ impl TerminalView {
             cells,
             cell_width,
             line_height,
+            cursor_shape,
             preedit_text: self.preedit_text.clone(),
         }
+    }
+
+    /// Compute caret bounds used by IME/text-input integrations.
+    ///
+    /// This uses cursor coordinates from cached terminal content, independent of cursor
+    /// visibility/blink state, so platform integrations always have a stable caret anchor.
+    pub(super) fn compute_input_cursor_bounds(
+        &self,
+        origin: Point<Pixels>,
+        cell_width: Pixels,
+        line_height: Pixels,
+    ) -> Option<Bounds<Pixels>> {
+        let cached = self.cached_content.as_ref()?;
+        let (cursor_line, cursor_col) = cached.cursor;
+        let display_cursor_line = cursor_line + cached.display_offset;
+        if display_cursor_line < 0 {
+            return None;
+        }
+        let display_cursor_line = display_cursor_line as usize;
+        let row = cached.cells.get(display_cursor_line)?;
+        if cursor_col >= row.len() {
+            return None;
+        }
+
+        let cell = &row[cursor_col];
+        let width = if cell.flags.contains(CellFlags::WIDE_CHAR) {
+            cell_width * 2.0
+        } else {
+            cell_width
+        };
+
+        Some(Bounds::new(
+            Point::new(
+                origin.x + cell_width * cursor_col,
+                origin.y + line_height * display_cursor_line,
+            ),
+            Size {
+                width,
+                height: line_height,
+            },
+        ))
     }
 }
 
@@ -840,12 +1254,30 @@ impl Focusable for TerminalView {
 impl EntityInputHandler for TerminalView {
     fn text_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
-        _actual_range: &mut Option<Range<usize>>,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        Some(String::new())
+        let in_alt_screen = self.is_mode_set(TermMode::ALT_SCREEN);
+        Self::trace_input_event(format!(
+            "text_for_range req={:?} in_alt_screen={}",
+            range_utf16, in_alt_screen
+        ));
+        if in_alt_screen {
+            return None;
+        }
+        let total = self.input_shadow_text.encode_utf16().count();
+        let start = range_utf16.start.min(total);
+        let end = range_utf16.end.min(total);
+        *actual_range = Some(start..end);
+        let text = Self::slice_utf16(&self.input_shadow_text, start..end);
+        Self::trace_input_event(format!(
+            "text_for_range resp_len={} total_utf16={}",
+            text.encode_utf16().count(),
+            total
+        ));
+        Some(text)
     }
 
     fn selected_text_range(
@@ -854,10 +1286,33 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        Some(UTF16Selection {
-            range: 0..0,
-            reversed: false,
-        })
+        const RECENT_COMMIT_SELECTION_TTL: Duration = Duration::from_secs(4);
+        let in_alt_screen = self.is_mode_set(TermMode::ALT_SCREEN);
+        Self::trace_input_event(format!("selected_text_range in_alt_screen={in_alt_screen}"));
+        if in_alt_screen {
+            None
+        } else {
+            if let Some((range, at)) = self.recent_committed_range.as_ref()
+                && at.elapsed() <= RECENT_COMMIT_SELECTION_TTL
+                && !range.is_empty()
+            {
+                Self::trace_input_event(format!(
+                    "commit_probe selected_range={}..{} age_ms={}",
+                    range.start,
+                    range.end,
+                    at.elapsed().as_millis()
+                ));
+                return Some(UTF16Selection {
+                    range: range.clone(),
+                    reversed: false,
+                });
+            }
+            let len = self.input_shadow_text.encode_utf16().count();
+            Some(UTF16Selection {
+                range: len..len,
+                reversed: false,
+            })
+        }
     }
 
     fn marked_text_range(
@@ -880,13 +1335,18 @@ impl EntityInputHandler for TerminalView {
         &mut self,
         _range_utf16: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Clear preedit and send committed text to terminal
         self.preedit_text.clear();
         if !text.is_empty() {
+            Self::trace_input_event(format!("replace_text_in_range len={}", text.len()));
+            self.cancel_pending_ctrl_c();
             self.write_to_terminal(text.as_bytes());
+            self.update_input_shadow_text(text);
+            self.arm_accessibility_commit(text);
+            window.invalidate_character_coordinates();
         }
         cx.notify();
     }
@@ -906,13 +1366,24 @@ impl EntityInputHandler for TerminalView {
 
     fn bounds_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
-        bounds: Bounds<Pixels>,
+        range_utf16: Range<usize>,
+        _bounds: Bounds<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // Return bounds for IME candidate window positioning
-        Some(bounds)
+        let mut caret = self.input_cursor_bounds?;
+        if range_utf16.start > 0 {
+            caret.origin.x += px(self.cell_width * range_utf16.start as f32);
+        }
+        let x: f32 = caret.origin.x.into();
+        let y: f32 = caret.origin.y.into();
+        let w: f32 = caret.size.width.into();
+        let h: f32 = caret.size.height.into();
+        Self::trace_input_event(format!(
+            "bounds_for_range start={} -> ({:.1},{:.1},{:.1},{:.1})",
+            range_utf16.start, x, y, w, h
+        ));
+        Some(caret)
     }
 
     fn character_index_for_point(
@@ -921,12 +1392,38 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        Some(0)
+        None
+    }
+
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        Self::trace_input_event("accepts_text_input=true");
+        true
     }
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_in_subscription.is_none() {
+            let focus_handle = self.focus_handle.clone();
+            self.focus_in_subscription =
+                Some(cx.on_focus_in(&focus_handle, window, |this, _window, _cx| {
+                    if this.is_mode_set(TermMode::FOCUS_IN_OUT) {
+                        this.write_to_terminal(b"\x1b[I");
+                    }
+                }));
+        }
+        if self.focus_out_subscription.is_none() {
+            let focus_handle = self.focus_handle.clone();
+            self.focus_out_subscription =
+                Some(
+                    cx.on_focus_out(&focus_handle, window, |this, _event, _window, _cx| {
+                        if this.is_mode_set(TermMode::FOCUS_IN_OUT) {
+                            this.write_to_terminal(b"\x1b[O");
+                        }
+                    }),
+                );
+        }
+
         // Show error message if terminal creation failed
         if let Some(ref error) = self.error_message {
             return div()
@@ -955,6 +1452,9 @@ impl Render for TerminalView {
                 |d: gpui::Stateful<gpui::Div>| d.cursor_pointer(),
                 |d: gpui::Stateful<gpui::Div>| d.cursor_text(),
             )
+            .on_key_down(cx.listener(Self::on_terminal_key_down))
+            .on_key_up(cx.listener(Self::on_terminal_key_up))
+            .on_modifiers_changed(cx.listener(Self::on_terminal_modifiers_changed))
             // Register action handlers for special keys
             .on_action(cx.listener(Self::on_enter))
             .on_action(cx.listener(Self::on_backspace))
@@ -1065,6 +1565,18 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 let x: f32 = event.position.x.into();
                 let y: f32 = event.position.y.into();
+
+                // If MOUSE_MOTION mode: send every move; if MOUSE_DRAG: only send when dragging.
+                if this.is_mode_set(TermMode::MOUSE_MOTION) {
+                    let (screen_line, col) = this.position_to_cell(x, y);
+                    this.send_mouse_event_to_pty(32, col, screen_line as usize, true);
+                    return;
+                } else if this.is_dragging && this.is_mode_set(TermMode::MOUSE_DRAG) {
+                    let (screen_line, col) = this.position_to_cell(x, y);
+                    this.send_mouse_event_to_pty(32, col, screen_line as usize, true);
+                    // Keep local drag handling active for selection visuals.
+                }
+
                 if this.is_dragging {
                     this.handle_mouse_drag(x, y, cx);
                 }

@@ -35,10 +35,21 @@ impl Render for SashikiApp {
             .on_action(cx.listener(Self::on_close_file_view))
             .on_action(cx.listener(Self::on_open_folder))
             .on_action(cx.listener(Self::on_toggle_verify_terminal))
+            .on_action(cx.listener(Self::on_open_commit_dialog))
+            .on_action(cx.listener(Self::on_open_stash_dialog))
             .child(self.render_header(layout_mode, session_count, running_session_count, cx))
             .child(self.render_main_content(layout_mode, cx))
             .when(self.open_menu.is_some(), |this| {
                 this.child(self.render_menu_overlay(cx))
+            })
+            .when(self.commit_dropdown_open, |this| {
+                this.child(self.render_commit_dropdown_overlay(cx))
+            })
+            .when(matches!(self.active_dialog, ActiveDialog::Commit), |this| {
+                this.child(self.render_commit_dialog(cx))
+            })
+            .when(matches!(self.active_dialog, ActiveDialog::Stash), |this| {
+                this.child(self.render_stash_dialog(cx))
             })
             .when(
                 matches!(self.active_dialog, ActiveDialog::CreateWorktree),
@@ -50,6 +61,58 @@ impl Render for SashikiApp {
                     _ => None,
                 },
                 |this, idx| this.child(self.render_delete_dialog(idx, cx)),
+            )
+            .when_some(
+                match &self.active_dialog {
+                    ActiveDialog::DiscardFileConfirm { path, change_type } => {
+                        Some((path.clone(), *change_type))
+                    }
+                    _ => None,
+                },
+                |this, (path, change_type)| {
+                    this.child(self.render_discard_confirm_dialog(&path, change_type, cx))
+                },
+            )
+            .when(
+                matches!(self.active_dialog, ActiveDialog::DiscardAllConfirm),
+                |this| this.child(self.render_discard_all_confirm_dialog(cx)),
+            )
+            .when(
+                matches!(self.active_dialog, ActiveDialog::SmartCommitConfirm),
+                |this| this.child(self.render_smart_commit_confirm_dialog(cx)),
+            )
+            .when(
+                matches!(self.active_dialog, ActiveDialog::UndoCommitConfirm),
+                |this| this.child(self.render_undo_commit_confirm_dialog(cx)),
+            )
+            .when(
+                matches!(self.active_dialog, ActiveDialog::AmendCommitConfirm),
+                |this| this.child(self.render_amend_commit_confirm_dialog(cx)),
+            )
+            .when(
+                matches!(self.active_dialog, ActiveDialog::DiscardHunkConfirm),
+                |this| this.child(self.render_discard_hunk_confirm_dialog(cx)),
+            )
+            .when_some(
+                match &self.active_dialog {
+                    ActiveDialog::StashApplyConfirm { reference } => Some(reference.as_str()),
+                    _ => None,
+                },
+                |this, r| this.child(self.render_stash_apply_confirm_dialog(r, cx)),
+            )
+            .when_some(
+                match &self.active_dialog {
+                    ActiveDialog::StashPopConfirm { reference } => Some(reference.as_str()),
+                    _ => None,
+                },
+                |this, r| this.child(self.render_stash_pop_confirm_dialog(r, cx)),
+            )
+            .when_some(
+                match &self.active_dialog {
+                    ActiveDialog::StashDropConfirm { reference } => Some(reference.as_str()),
+                    _ => None,
+                },
+                |this, r| this.child(self.render_stash_drop_confirm_dialog(r, cx)),
             )
             .when(
                 matches!(self.active_dialog, ActiveDialog::Deleting),
@@ -227,31 +290,50 @@ impl SashikiApp {
                     ));
             }
             MenuId::File => {
-                dropdown = dropdown.child(Self::render_menu_item(
-                    "Open Folder...",
-                    Some("Ctrl+O"),
-                    cx,
-                    |this, _, cx| {
-                        this.open_menu = None;
-                        cx.notify();
-                        let paths_receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
-                            files: false,
-                            directories: true,
-                            multiple: false,
-                            prompt: None,
-                        });
-                        cx.spawn(async move |entity, cx| {
-                            if let Ok(Ok(Some(paths))) = paths_receiver.await {
-                                if let Some(path) = paths.into_iter().next() {
-                                    let _ = entity.update(cx, |app, cx| {
-                                        app.open_project(path, cx);
-                                    });
+                dropdown = dropdown
+                    .child(Self::render_menu_item(
+                        "Open Folder...",
+                        Some("Ctrl+O"),
+                        cx,
+                        |this, _, cx| {
+                            this.open_menu = None;
+                            cx.notify();
+                            let paths_receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+                                files: false,
+                                directories: true,
+                                multiple: false,
+                                prompt: None,
+                            });
+                            cx.spawn(async move |entity, cx| {
+                                if let Ok(Ok(Some(paths))) = paths_receiver.await {
+                                    if let Some(path) = paths.into_iter().next() {
+                                        let _ = entity.update(cx, |app, cx| {
+                                            app.open_project(path, cx);
+                                        });
+                                    }
                                 }
-                            }
-                        })
-                        .detach();
-                    },
-                ));
+                            })
+                            .detach();
+                        },
+                    ))
+                    .child(Self::render_menu_item(
+                        "Commit...",
+                        Some("Ctrl+Shift+M"),
+                        cx,
+                        |this, window, cx| {
+                            this.open_menu = None;
+                            this.open_commit_dialog(window, cx);
+                        },
+                    ))
+                    .child(Self::render_menu_item(
+                        "Stash...",
+                        Some("Ctrl+Shift+H"),
+                        cx,
+                        |this, window, cx| {
+                            this.open_menu = None;
+                            this.open_stash_dialog(window, cx);
+                        },
+                    ));
             }
             MenuId::View => {
                 dropdown = dropdown

@@ -8,8 +8,11 @@ pub mod render;
 pub mod sidebar;
 pub mod terminal;
 
-pub use file_tree::{ChangeInfo, FileListMode, FileTreeNode, read_dir_shallow};
-pub use file_view::{FileView, GotoDefinitionEvent, SendToTerminalEvent};
+pub use file_tree::{ChangeInfo, ChangeSection, FileListMode, FileTreeNode, read_dir_shallow};
+pub use file_view::{
+    FileView, GotoDefinitionEvent, SelectionAction, SendToTerminalEvent, StageSelectionEvent,
+    StageSelectionKind,
+};
 
 use crate::theme::*;
 use gpui::{IntoElement, ParentElement, Styled, div, rgb};

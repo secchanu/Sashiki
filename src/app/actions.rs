@@ -14,6 +14,8 @@ actions!(
         ToggleFileList,
         RefreshAll,
         CreateWorktree,
+        OpenCommitDialog,
+        OpenStashDialog,
         CloseFileView,
         OpenFolder,
         Quit,
@@ -45,8 +47,11 @@ impl SashikiApp {
         cx.notify();
     }
 
-    /// Start terminal for active session, focus it, and refresh file list
+    /// Start terminal for active session, focus it, and refresh file list.
+    /// Also clears per-session UI state (expanded dirs) that shouldn't carry over.
     pub fn activate_and_focus_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.staged_expanded_dirs.clear();
+        self.unstaged_expanded_dirs.clear();
         self.session_manager.ensure_active_session_terminal(cx);
         if self.show_verify_terminal {
             self.session_manager
@@ -93,6 +98,24 @@ impl SashikiApp {
     ) {
         self.show_file_list = !self.show_file_list;
         cx.notify();
+    }
+
+    pub fn on_open_commit_dialog(
+        &mut self,
+        _: &OpenCommitDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_commit_dialog(window, cx);
+    }
+
+    pub fn on_open_stash_dialog(
+        &mut self,
+        _: &OpenStashDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_stash_dialog(window, cx);
     }
 
     pub fn on_refresh_all(&mut self, _: &RefreshAll, _: &mut Window, cx: &mut Context<Self>) {

@@ -3,6 +3,7 @@
 use super::SashikiApp;
 use crate::dialog::ActiveDialog;
 use crate::git::{GitRepo, validate_branch_name};
+use crate::ui::StageSelectionEvent;
 use crate::template::{self, TemplateConfig};
 use gpui::{Context, Focusable, PathPromptOptions, Window};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,286 @@ impl SashikiApp {
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn open_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_changed_files_sync();
+        let has_any_changes = self
+            .changed_files
+            .iter()
+            .any(|f| f.has_staged_changes() || f.has_unstaged_changes());
+        if !has_any_changes {
+            // Nothing to commit — redirect to amend if HEAD exists (P2-Issue 3)
+            let has_head = if let Some(repo) = self.worktree_repo() {
+                repo.get_last_commit_message().is_ok()
+            } else {
+                false
+            };
+            if has_head {
+                self.open_amend_dialog(window, cx);
+            } else {
+                self.active_dialog = ActiveDialog::Error {
+                    message: "Nothing to commit".to_string(),
+                };
+                cx.notify();
+            }
+            return;
+        }
+
+        self.commit_amend_mode = false;
+        self.active_dialog = ActiveDialog::Commit;
+        self.commit_message_input.clear();
+        window.focus(&self.commit_dialog_focus, cx);
+        cx.notify();
+    }
+
+    /// Open the commit dialog pre-configured for amending the last commit.
+    pub fn open_amend_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let last_msg = if let Some(repo) = self.worktree_repo() {
+            repo.get_last_commit_message().unwrap_or_default()
+        } else {
+            self.active_dialog = ActiveDialog::Error {
+                message: "Git repository not available for active worktree".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+
+        self.commit_amend_mode = true;
+        self.active_dialog = ActiveDialog::Commit;
+        self.commit_message_input = last_msg;
+        window.focus(&self.commit_dialog_focus, cx);
+        cx.notify();
+    }
+
+    pub fn close_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::None;
+        self.commit_amend_mode = false;
+        self.commit_message_input.clear();
+        if let Some(terminal) = self.active_terminal() {
+            let focus = terminal.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn submit_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let message = self.commit_message_input.trim().to_string();
+        if message.is_empty() {
+            self.active_dialog = ActiveDialog::Error {
+                message: "Commit message cannot be empty".to_string(),
+            };
+            cx.notify();
+            return;
+        }
+
+        let amend = self.commit_amend_mode;
+        // Read has_staged before calling worktree_repo() to avoid borrow conflict
+        let has_staged = self.changed_files.iter().any(|f| f.has_staged_changes());
+
+        // Amend: ask for confirmation before overwriting the last commit.
+        if amend {
+            self.active_dialog = ActiveDialog::AmendCommitConfirm;
+            cx.notify();
+            return;
+        }
+
+        // Smart commit: ask for confirmation before auto-staging (P1-Issue 4)
+        if !has_staged {
+            self.active_dialog = ActiveDialog::SmartCommitConfirm;
+            cx.notify();
+            return;
+        }
+
+        let result = if let Some(repo) = self.worktree_repo() {
+            repo.commit(&message)
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+
+        match result {
+            Ok(()) => {
+                self.commit_amend_mode = false;
+                self.close_commit_dialog(window, cx);
+                self.refresh_file_list_async(cx);
+            }
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to commit: {}", e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn open_stash_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entries_result = if let Some(repo) = self.worktree_repo() {
+            repo.list_stashes()
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+
+        match entries_result {
+            Ok(entries) => {
+                // repo の借用を先にまとめて解放してから self のフィールドを更新する
+                let entry_files: Vec<(String, Vec<(String, String)>)> =
+                    if let Some(repo) = self.worktree_repo() {
+                        entries
+                            .iter()
+                            .filter_map(|e| {
+                                repo.stash_show_files(&e.reference)
+                                    .ok()
+                                    .map(|files| (e.reference.clone(), files))
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                self.stash_entry_files.clear();
+                for (reference, files) in entry_files {
+                    self.stash_entry_files.insert(reference, files);
+                }
+                self.stash_entries = entries;
+                self.stash_expanded_entries.clear();
+                self.stash_message_input.clear();
+                self.active_dialog = ActiveDialog::Stash;
+                window.focus(&self.stash_dialog_focus, cx);
+                cx.notify();
+            }
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to load stashes: {}", e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn close_stash_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::None;
+        self.stash_message_input.clear();
+        if let Some(terminal) = self.active_terminal() {
+            let focus = terminal.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn create_stash(&mut self, cx: &mut Context<Self>) {
+        let message = self.stash_message_input.trim().to_string();
+        let mode = self.stash_mode;
+        let result = if let Some(repo) = self.worktree_repo() {
+            if message.is_empty() {
+                repo.create_stash(None, mode)
+            } else {
+                repo.create_stash(Some(&message), mode)
+            }
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+
+        match result {
+            Ok(()) => {
+                self.stash_message_input.clear();
+                self.refresh_file_list_async(cx);
+                self.refresh_stash_entries(cx);
+            }
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to create stash: {}", e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn apply_stash_entry(&mut self, reference: String, cx: &mut Context<Self>) {
+        let result = if let Some(repo) = self.worktree_repo() {
+            repo.apply_stash(&reference)
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+
+        match result {
+            Ok(()) => {
+                self.refresh_file_list_async(cx);
+                self.refresh_stash_entries(cx);
+            }
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to apply stash {}: {}", reference, e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn pop_stash_entry(&mut self, reference: String, cx: &mut Context<Self>) {
+        let result = if let Some(repo) = self.worktree_repo() {
+            repo.pop_stash(&reference)
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+
+        match result {
+            Ok(()) => {
+                self.refresh_file_list_async(cx);
+                self.refresh_stash_entries(cx);
+            }
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to pop stash {}: {}", reference, e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn drop_stash_entry(&mut self, reference: String, cx: &mut Context<Self>) {
+        let result = if let Some(repo) = self.worktree_repo() {
+            repo.drop_stash(&reference)
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+
+        match result {
+            Ok(()) => self.refresh_stash_entries(cx),
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to drop stash {}: {}", reference, e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    fn refresh_stash_entries(&mut self, cx: &mut Context<Self>) {
+        if let Some(repo) = self.worktree_repo() {
+            match repo.list_stashes() {
+                Ok(entries) => self.stash_entries = entries,
+                Err(e) => {
+                    self.active_dialog = ActiveDialog::Error {
+                        message: format!("Failed to refresh stash list: {}", e),
+                    };
+                    cx.notify();
+                    return;
+                }
+            }
         }
         cx.notify();
     }
@@ -277,6 +558,265 @@ impl SashikiApp {
     }
 
     // === Delete worktree ===
+
+    pub fn open_undo_commit_confirm(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::UndoCommitConfirm;
+        cx.notify();
+    }
+
+    pub fn close_undo_commit_confirm(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::None;
+        cx.notify();
+    }
+
+    /// Undo the last commit (git reset --soft HEAD~1).
+    /// The undone commit's changes are left staged.
+    pub fn confirm_undo_last_commit(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::None;
+        let result = if let Some(repo) = self.worktree_repo() {
+            repo.undo_last_commit()
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+
+        match result {
+            Ok(()) => self.refresh_file_list_async(cx),
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to undo last commit: {}", e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn open_discard_all_confirm(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::DiscardAllConfirm;
+        cx.notify();
+    }
+
+    pub fn confirm_discard_all(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::None;
+        let result = if let Some(repo) = self.worktree_repo() {
+            repo.discard_all_changes()
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+
+        match result {
+            Ok(()) => self.refresh_file_list_async(cx),
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to discard all changes: {}", e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn close_discard_all_confirm(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::None;
+        cx.notify();
+    }
+
+    /// User confirmed Smart Commit: stage all changes then commit.
+    pub fn confirm_smart_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stage_result = if let Some(repo) = self.worktree_repo() {
+            repo.stage_all()
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+        if let Err(e) = stage_result {
+            self.active_dialog = ActiveDialog::Error {
+                message: format!("Failed to stage changes: {}", e),
+            };
+            cx.notify();
+            return;
+        }
+
+        let message = self.commit_message_input.trim().to_string();
+        let result = if let Some(repo) = self.worktree_repo() {
+            repo.commit(&message)
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+        match result {
+            Ok(()) => {
+                self.commit_amend_mode = false;
+                self.close_commit_dialog(window, cx);
+                self.refresh_file_list_async(cx);
+            }
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to commit: {}", e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn cancel_smart_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Return user to the commit dialog they were in
+        self.active_dialog = ActiveDialog::Commit;
+        window.focus(&self.commit_dialog_focus, cx);
+        cx.notify();
+    }
+
+    // === Amend Commit Confirm ===
+
+    /// Execute the amend after user confirmed via AmendCommitConfirm dialog.
+    pub fn confirm_amend_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let message = self.commit_message_input.trim().to_string();
+        let result = if let Some(repo) = self.worktree_repo() {
+            repo.amend_commit(Some(&message))
+        } else {
+            Err(crate::git::GitError::Command(
+                "Git repository not available for active worktree".to_string(),
+            ))
+        };
+        match result {
+            Ok(()) => {
+                self.commit_amend_mode = false;
+                self.close_commit_dialog(window, cx);
+                self.refresh_file_list_async(cx);
+            }
+            Err(e) => {
+                self.active_dialog = ActiveDialog::Error {
+                    message: format!("Failed to amend commit: {}", e),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn cancel_amend_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::Commit;
+        window.focus(&self.commit_dialog_focus, cx);
+        cx.notify();
+    }
+
+    // === Discard Hunk Confirm ===
+
+    pub fn open_discard_hunk_confirm(&mut self, event: StageSelectionEvent, cx: &mut Context<Self>) {
+        self.pending_discard_hunk = Some(event);
+        self.active_dialog = ActiveDialog::DiscardHunkConfirm;
+        cx.notify();
+    }
+
+    pub fn confirm_discard_hunk(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::None;
+        let event = match self.pending_discard_hunk.take() {
+            Some(e) => e,
+            None => return,
+        };
+        // Use execute_stage_selection to bypass the confirmation gate.
+        self.execute_stage_selection(event, cx);
+    }
+
+    pub fn cancel_discard_hunk(&mut self, cx: &mut Context<Self>) {
+        self.pending_discard_hunk = None;
+        self.active_dialog = ActiveDialog::None;
+        cx.notify();
+    }
+
+    // === Stash Apply Confirm ===
+
+    pub fn open_stash_apply_confirm(&mut self, reference: String, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::StashApplyConfirm { reference };
+        cx.notify();
+    }
+
+    pub fn confirm_apply_stash(&mut self, cx: &mut Context<Self>) {
+        let reference = match &self.active_dialog {
+            ActiveDialog::StashApplyConfirm { reference } => reference.clone(),
+            _ => return,
+        };
+        self.active_dialog = ActiveDialog::Stash;
+        self.apply_stash_entry(reference, cx);
+    }
+
+    pub fn cancel_stash_apply(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::Stash;
+        cx.notify();
+    }
+
+    // === Stash Pop Confirm ===
+
+    pub fn open_stash_pop_confirm(&mut self, reference: String, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::StashPopConfirm { reference };
+        cx.notify();
+    }
+
+    pub fn confirm_pop_stash(&mut self, cx: &mut Context<Self>) {
+        let reference = match &self.active_dialog {
+            ActiveDialog::StashPopConfirm { reference } => reference.clone(),
+            _ => return,
+        };
+        self.active_dialog = ActiveDialog::Stash;
+        self.pop_stash_entry(reference, cx);
+    }
+
+    pub fn cancel_stash_pop(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::Stash;
+        cx.notify();
+    }
+
+    // === Stash Drop Confirm ===
+
+    pub fn open_stash_drop_confirm(&mut self, reference: String, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::StashDropConfirm { reference };
+        cx.notify();
+    }
+
+    pub fn confirm_drop_stash(&mut self, cx: &mut Context<Self>) {
+        let reference = match &self.active_dialog {
+            ActiveDialog::StashDropConfirm { reference } => reference.clone(),
+            _ => return,
+        };
+        self.active_dialog = ActiveDialog::Stash;
+        self.drop_stash_entry(reference, cx);
+    }
+
+    pub fn cancel_stash_drop(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::Stash;
+        cx.notify();
+    }
+
+    pub fn open_discard_confirm(
+        &mut self,
+        path: std::path::PathBuf,
+        change_type: crate::git::ChangeType,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_dialog = ActiveDialog::DiscardFileConfirm { path, change_type };
+        cx.notify();
+    }
+
+    pub fn confirm_discard_file(&mut self, cx: &mut Context<Self>) {
+        let ActiveDialog::DiscardFileConfirm {
+            ref path,
+            change_type,
+        } = self.active_dialog
+        else {
+            return;
+        };
+        let path = path.clone();
+        self.active_dialog = ActiveDialog::None;
+        self.discard_file(path, change_type, cx);
+    }
+
+    pub fn close_discard_confirm(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::None;
+        cx.notify();
+    }
 
     pub fn open_delete_dialog(&mut self, index: usize, cx: &mut Context<Self>) {
         let sessions = self.session_manager.sessions();

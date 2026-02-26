@@ -5,7 +5,9 @@
 //! - Hook support (post-checkout etc.)
 //! - Simpler build (no C library dependency)
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -59,6 +61,50 @@ fn run_git(workdir: &Path, args: &[&str]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run a git command with stdin input and return stdout on success.
+fn run_git_with_input(workdir: &Path, args: &[&str], input: &str) -> Result<String> {
+    let mut child = std::process::Command::new("git")
+        .args(args)
+        .current_dir(workdir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(GitError::Exec)?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| GitError::Command("Failed to open stdin for git command".to_string()))?;
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|e| GitError::Command(e.to_string()))?;
+    }
+
+    let output = child.wait_with_output().map_err(GitError::Exec)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(GitError::Command(stderr));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[derive(Debug, Clone)]
+struct ParsedDiff {
+    preamble: Vec<String>,
+    hunks: Vec<DiffHunk>,
+}
+
+#[derive(Debug, Clone)]
+struct DiffHunk {
+    header: String,
+    lines: Vec<String>,
+    new_start: usize,
+    new_count: usize,
 }
 
 impl GitRepo {
@@ -321,34 +367,27 @@ impl GitRepo {
             let path_str = &line[3..];
 
             // Handle renamed files: "old -> new"
+            // Strip trailing '/' that git appends to untracked directories.
             let path = if let Some(arrow_pos) = path_str.find(" -> ") {
-                PathBuf::from(&path_str[arrow_pos + 4..])
+                PathBuf::from(path_str[arrow_pos + 4..].trim_end_matches('/'))
             } else {
-                PathBuf::from(path_str)
+                PathBuf::from(path_str.trim_end_matches('/'))
             };
 
-            let change_type = if matches!(
-                (index_status, wt_status),
-                (b'A', _) | (_, b'A') | (b'?', b'?')
-            ) {
-                ChangeType::Added
-            } else if matches!((index_status, wt_status), (b'M', _) | (_, b'M')) {
-                ChangeType::Modified
-            } else if matches!((index_status, wt_status), (b'D', _) | (_, b'D')) {
-                ChangeType::Deleted
-            } else if matches!((index_status, wt_status), (b'R', _) | (_, b'R')) {
-                ChangeType::Renamed
+            let staged_change = Self::index_status_to_change(index_status);
+            let unstaged_change = if index_status == b'?' && wt_status == b'?' {
+                Some(ChangeType::Added)
             } else {
-                ChangeType::Unknown
+                Self::worktree_status_to_change(wt_status)
             };
 
-            let staged = matches!(index_status, b'A' | b'M' | b'D' | b'R');
-
-            files.push(ChangedFile {
-                path,
-                change_type,
-                staged,
-            });
+            if staged_change.is_some() || unstaged_change.is_some() {
+                files.push(ChangedFile {
+                    path,
+                    staged_change,
+                    unstaged_change,
+                });
+            }
         }
 
         Ok(files)
@@ -370,8 +409,7 @@ impl GitRepo {
 
     /// Get diff for a specific file using `git diff HEAD`
     pub fn get_file_diff(&self, file_path: &Path) -> Result<String> {
-        let relative_path = file_path.strip_prefix(&self.workdir).unwrap_or(file_path);
-        let rel_str = relative_path.to_string_lossy();
+        let rel_str = self.relative_path_string(file_path);
 
         // Try staged + unstaged diff against HEAD
         match run_git(&self.workdir, &["diff", "HEAD", "--", &rel_str]) {
@@ -385,9 +423,581 @@ impl GitRepo {
 
     /// Get file content from HEAD using `git show HEAD:<path>`
     pub fn get_file_content_from_head(&self, file_path: &Path) -> Result<String> {
-        let relative_path = file_path.strip_prefix(&self.workdir).unwrap_or(file_path);
-        let spec = format!("HEAD:{}", relative_path.to_string_lossy());
+        let spec = format!("HEAD:{}", self.relative_path_string(file_path));
         run_git(&self.workdir, &["show", &spec])
+    }
+
+    /// Get file content from index using `git show :<path>`
+    pub fn get_file_content_from_index(&self, file_path: &Path) -> Result<String> {
+        let spec = format!(":{}", self.relative_path_string(file_path));
+        run_git(&self.workdir, &["show", &spec])
+    }
+
+    /// Get staged-only diff for a specific file (`git diff --cached`).
+    pub fn get_file_diff_staged(&self, file_path: &Path) -> Result<String> {
+        let rel = self.relative_path_string(file_path);
+        run_git(&self.workdir, &["diff", "--cached", "--", &rel]).or_else(|_| Ok(String::new()))
+    }
+
+    /// Get unstaged-only diff for a specific file (`git diff`).
+    pub fn get_file_diff_unstaged(&self, file_path: &Path) -> Result<String> {
+        let rel = self.relative_path_string(file_path);
+        run_git(&self.workdir, &["diff", "--", &rel]).or_else(|_| Ok(String::new()))
+    }
+
+    /// Stage a file (`git add -- <path>`).
+    pub fn stage_file(&self, file_path: &Path) -> Result<()> {
+        let rel = self.relative_path_string(file_path);
+        run_git(&self.workdir, &["add", "--", &rel])?;
+        Ok(())
+    }
+
+    /// Stage the unstaged hunk containing the given (1-based) new-file line.
+    pub fn stage_hunk_at_line(&self, file_path: &Path, line: usize) -> Result<()> {
+        let diff = self.get_unstaged_file_diff(file_path, Some(3))?;
+        let parsed = Self::parse_diff(&diff)?;
+        if parsed.hunks.is_empty() {
+            return Err(GitError::Command(
+                "No unstaged hunks found for this file".to_string(),
+            ));
+        }
+
+        let selected = parsed
+            .hunks
+            .iter()
+            .enumerate()
+            .find(|(_, h)| Self::hunk_contains_line(h, line))
+            .map(|(idx, _)| idx)
+            .ok_or_else(|| {
+                GitError::Command(format!(
+                    "No unstaged hunk found at line {}. Select a changed line and retry.",
+                    line
+                ))
+            })?;
+
+        let patch = Self::build_patch(&parsed, &[selected]);
+        self.apply_patch_to_index(&patch, false, false)?;
+        Ok(())
+    }
+
+    /// Stage unstaged changes intersecting the given (1-based) new-file line range.
+    pub fn stage_line_range(
+        &self,
+        file_path: &Path,
+        range_start: usize,
+        range_end: usize,
+    ) -> Result<()> {
+        let (start, end) = if range_start <= range_end {
+            (range_start, range_end)
+        } else {
+            (range_end, range_start)
+        };
+
+        let diff = self.get_unstaged_file_diff(file_path, Some(0))?;
+        let parsed = Self::parse_diff(&diff)?;
+        if parsed.hunks.is_empty() {
+            return Err(GitError::Command(
+                "No unstaged hunks found for this file".to_string(),
+            ));
+        }
+
+        let selected: Vec<usize> = parsed
+            .hunks
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| Self::hunk_intersects_range(h, start, end))
+            .map(|(idx, _)| idx)
+            .collect();
+
+        if selected.is_empty() {
+            return Err(GitError::Command(format!(
+                "No unstaged changes intersect selected range {}-{}",
+                start, end
+            )));
+        }
+
+        let patch = Self::build_patch(&parsed, &selected);
+        self.apply_patch_to_index(&patch, true, false)?;
+        Ok(())
+    }
+
+    /// Unstage the staged hunk containing the given (1-based) new-file line.
+    pub fn unstage_hunk_at_line(&self, file_path: &Path, line: usize) -> Result<()> {
+        let diff = self.get_staged_file_diff(file_path, Some(3))?;
+        let parsed = Self::parse_diff(&diff)?;
+        if parsed.hunks.is_empty() {
+            return Err(GitError::Command(
+                "No staged hunks found for this file".to_string(),
+            ));
+        }
+
+        let selected = parsed
+            .hunks
+            .iter()
+            .enumerate()
+            .find(|(_, h)| Self::hunk_contains_line(h, line))
+            .map(|(idx, _)| idx)
+            .ok_or_else(|| {
+                GitError::Command(format!(
+                    "No staged hunk found at line {}. Select a staged line and retry.",
+                    line
+                ))
+            })?;
+
+        let patch = Self::build_patch(&parsed, &[selected]);
+        self.apply_patch_to_index(&patch, false, true)?;
+        Ok(())
+    }
+
+    /// Unstage staged changes intersecting the given (1-based) new-file line range.
+    pub fn unstage_line_range(
+        &self,
+        file_path: &Path,
+        range_start: usize,
+        range_end: usize,
+    ) -> Result<()> {
+        let (start, end) = if range_start <= range_end {
+            (range_start, range_end)
+        } else {
+            (range_end, range_start)
+        };
+
+        let diff = self.get_staged_file_diff(file_path, Some(0))?;
+        let parsed = Self::parse_diff(&diff)?;
+        if parsed.hunks.is_empty() {
+            return Err(GitError::Command(
+                "No staged hunks found for this file".to_string(),
+            ));
+        }
+
+        let selected: Vec<usize> = parsed
+            .hunks
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| Self::hunk_intersects_range(h, start, end))
+            .map(|(idx, _)| idx)
+            .collect();
+
+        if selected.is_empty() {
+            return Err(GitError::Command(format!(
+                "No staged changes intersect selected range {}-{}",
+                start, end
+            )));
+        }
+
+        let patch = Self::build_patch(&parsed, &selected);
+        self.apply_patch_to_index(&patch, true, true)?;
+        Ok(())
+    }
+
+    /// Discard the unstaged hunk containing the given (1-based) new-file line.
+    pub fn discard_hunk_at_line(&self, file_path: &Path, line: usize) -> Result<()> {
+        let diff = self.get_unstaged_file_diff(file_path, Some(3))?;
+        let parsed = Self::parse_diff(&diff)?;
+        if parsed.hunks.is_empty() {
+            return Err(GitError::Command(
+                "No unstaged hunks found for this file".to_string(),
+            ));
+        }
+
+        let selected = parsed
+            .hunks
+            .iter()
+            .enumerate()
+            .find(|(_, h)| Self::hunk_contains_line(h, line))
+            .map(|(idx, _)| idx)
+            .ok_or_else(|| {
+                GitError::Command(format!(
+                    "No unstaged hunk found at line {}. Select a changed line and retry.",
+                    line
+                ))
+            })?;
+
+        let patch = Self::build_patch(&parsed, &[selected]);
+        self.apply_patch_to_worktree(&patch, false, true)?;
+        Ok(())
+    }
+
+    /// Discard unstaged changes intersecting the given (1-based) new-file line range.
+    pub fn discard_line_range(
+        &self,
+        file_path: &Path,
+        range_start: usize,
+        range_end: usize,
+    ) -> Result<()> {
+        let (start, end) = if range_start <= range_end {
+            (range_start, range_end)
+        } else {
+            (range_end, range_start)
+        };
+
+        let diff = self.get_unstaged_file_diff(file_path, Some(0))?;
+        let parsed = Self::parse_diff(&diff)?;
+        if parsed.hunks.is_empty() {
+            return Err(GitError::Command(
+                "No unstaged hunks found for this file".to_string(),
+            ));
+        }
+
+        let selected: Vec<usize> = parsed
+            .hunks
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| Self::hunk_intersects_range(h, start, end))
+            .map(|(idx, _)| idx)
+            .collect();
+
+        if selected.is_empty() {
+            return Err(GitError::Command(format!(
+                "No unstaged changes intersect selected range {}-{}",
+                start, end
+            )));
+        }
+
+        let patch = Self::build_patch(&parsed, &selected);
+        self.apply_patch_to_worktree(&patch, true, true)?;
+        Ok(())
+    }
+
+    /// Unstage a file (`git restore --staged -- <path>`).
+    /// Falls back to `git rm --cached` for unborn HEAD cases.
+    pub fn unstage_file(&self, file_path: &Path) -> Result<()> {
+        let rel = self.relative_path_string(file_path);
+        match run_git(&self.workdir, &["restore", "--staged", "--", &rel]) {
+            Ok(_) => Ok(()),
+            Err(primary_err) => {
+                let fallback = run_git(&self.workdir, &["rm", "--cached", "--quiet", "--", &rel]);
+                match fallback {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(primary_err),
+                }
+            }
+        }
+    }
+
+    /// Discard unstaged working-tree changes for a tracked file (`git restore -- <path>`).
+    pub fn restore_file(&self, file_path: &Path) -> Result<()> {
+        let rel = self.relative_path_string(file_path);
+        run_git(&self.workdir, &["restore", "--", &rel])?;
+        Ok(())
+    }
+
+    /// Delete an untracked file from the working tree (`git clean -f -- <path>`).
+    pub fn clean_file(&self, file_path: &Path) -> Result<()> {
+        let rel = self.relative_path_string(file_path);
+        run_git(&self.workdir, &["clean", "-f", "--", &rel])?;
+        Ok(())
+    }
+
+    /// Stage all changes in the worktree with a single `git add -A` command.
+    pub fn stage_all(&self) -> Result<()> {
+        run_git(&self.workdir, &["add", "-A"])?;
+        Ok(())
+    }
+
+    /// Unstage all staged changes.
+    /// Falls back to `git rm --cached -r .` for unborn HEAD cases (initial commit).
+    pub fn unstage_all(&self) -> Result<()> {
+        match run_git(&self.workdir, &["restore", "--staged", "."]) {
+            Ok(_) => Ok(()),
+            Err(primary_err) => {
+                let fallback =
+                    run_git(&self.workdir, &["rm", "--cached", "-r", "--quiet", "."]);
+                match fallback {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(primary_err),
+                }
+            }
+        }
+    }
+
+    /// Create a commit with the given message (`git commit -m <message>`).
+    pub fn commit(&self, message: &str) -> Result<()> {
+        run_git(&self.workdir, &["commit", "-m", message])?;
+        Ok(())
+    }
+
+    /// List stashes.
+    pub fn list_stashes(&self) -> Result<Vec<StashEntry>> {
+        let output = run_git(
+            &self.workdir,
+            &["stash", "list", "--pretty=format:%gd%x00%s"],
+        )?;
+
+        let mut entries = Vec::new();
+        for line in output.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((reference, message)) = line.split_once('\0') {
+                entries.push(StashEntry {
+                    reference: reference.to_string(),
+                    message: message.to_string(),
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Create a new stash with the specified scope.
+    pub fn create_stash(&self, message: Option<&str>, mode: StashMode) -> Result<()> {
+        let mut args = vec!["stash", "push"];
+        match mode {
+            StashMode::Staged => args.push("--staged"),
+            StashMode::IncludeUntracked => args.push("--include-untracked"),
+            StashMode::All => {}
+        }
+        if let Some(msg) = message.map(str::trim).filter(|m| !m.is_empty()) {
+            args.push("-m");
+            args.push(msg);
+        }
+        run_git(&self.workdir, &args)?;
+        Ok(())
+    }
+
+    /// List files changed in a stash entry (`git stash show --name-status <ref>`).
+    /// Returns `(status, path)` pairs, e.g. `("M", "src/app.rs")`.
+    pub fn stash_show_files(&self, reference: &str) -> Result<Vec<(String, String)>> {
+        let output =
+            run_git(&self.workdir, &["stash", "show", "--name-status", reference])?;
+        Ok(output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| {
+                let mut parts = l.splitn(2, '\t');
+                let status = parts.next()?.trim().to_string();
+                let path = parts.next()?.trim().to_string();
+                Some((status, path))
+            })
+            .collect())
+    }
+
+    /// Apply a stash by reference (e.g. `stash@{0}`).
+    pub fn apply_stash(&self, reference: &str) -> Result<()> {
+        run_git(&self.workdir, &["stash", "apply", reference])?;
+        Ok(())
+    }
+
+    /// Drop a stash by reference (e.g. `stash@{0}`).
+    pub fn drop_stash(&self, reference: &str) -> Result<()> {
+        run_git(&self.workdir, &["stash", "drop", reference])?;
+        Ok(())
+    }
+
+    /// Apply and drop a stash in one step (`git stash pop <ref>`).
+    /// On merge conflict, the stash is kept intact so the user can resolve.
+    pub fn pop_stash(&self, reference: &str) -> Result<()> {
+        run_git(&self.workdir, &["stash", "pop", reference])?;
+        Ok(())
+    }
+
+    /// Amend the most recent commit.
+    /// If `message` is `Some`, replaces the message via stdin (`-F -`) to preserve multi-line bodies.
+    /// Otherwise keeps the existing message unchanged.
+    pub fn amend_commit(&self, message: Option<&str>) -> Result<()> {
+        match message {
+            Some(msg) => {
+                run_git_with_input(&self.workdir, &["commit", "--amend", "-F", "-"], msg)?
+            }
+            None => run_git(&self.workdir, &["commit", "--amend", "--no-edit"])?,
+        };
+        Ok(())
+    }
+
+    /// Get the full message of the most recent commit (`git log -1 --format=%B`).
+    pub fn get_last_commit_message(&self) -> Result<String> {
+        let output = run_git(&self.workdir, &["log", "-1", "--format=%B"])?;
+        Ok(output.trim().to_string())
+    }
+
+    /// Undo the last commit with `git reset --soft HEAD~1`.
+    /// Changes from the undone commit are left staged.
+    pub fn undo_last_commit(&self) -> Result<()> {
+        run_git(&self.workdir, &["reset", "--soft", "HEAD~1"])?;
+        Ok(())
+    }
+
+    /// Discard all unstaged changes: restores tracked files and removes untracked ones.
+    /// On unborn HEAD, `restore .` is expected to fail and is silently ignored.
+    pub fn discard_all_changes(&self) -> Result<()> {
+        // Restore tracked files to HEAD state; ignore error on unborn HEAD
+        let _ = run_git(&self.workdir, &["restore", "."]);
+        // Remove untracked files and directories (excludes .gitignore entries)
+        run_git(&self.workdir, &["clean", "-fd"])?;
+        Ok(())
+    }
+
+    fn get_unstaged_file_diff(&self, file_path: &Path, unified: Option<usize>) -> Result<String> {
+        let rel = self.relative_path_string(file_path);
+        if let Some(lines) = unified {
+            let unified_opt = format!("--unified={lines}");
+            run_git(&self.workdir, &["diff", &unified_opt, "--", &rel])
+        } else {
+            run_git(&self.workdir, &["diff", "--", &rel])
+        }
+    }
+
+    fn get_staged_file_diff(&self, file_path: &Path, unified: Option<usize>) -> Result<String> {
+        let rel = self.relative_path_string(file_path);
+        if let Some(lines) = unified {
+            let unified_opt = format!("--unified={lines}");
+            run_git(
+                &self.workdir,
+                &["diff", "--cached", &unified_opt, "--", &rel],
+            )
+        } else {
+            run_git(&self.workdir, &["diff", "--cached", "--", &rel])
+        }
+    }
+
+    fn apply_patch_to_index(&self, patch: &str, unidiff_zero: bool, reverse: bool) -> Result<()> {
+        let mut args = vec!["apply", "--cached", "--recount", "--whitespace=nowarn"];
+        if unidiff_zero {
+            args.push("--unidiff-zero");
+        }
+        if reverse {
+            args.push("-R");
+        }
+        args.push("-");
+        run_git_with_input(&self.workdir, &args, patch)?;
+        Ok(())
+    }
+
+    fn apply_patch_to_worktree(
+        &self,
+        patch: &str,
+        unidiff_zero: bool,
+        reverse: bool,
+    ) -> Result<()> {
+        let mut args = vec!["apply", "--recount", "--whitespace=nowarn"];
+        if unidiff_zero {
+            args.push("--unidiff-zero");
+        }
+        if reverse {
+            args.push("-R");
+        }
+        args.push("-");
+        run_git_with_input(&self.workdir, &args, patch)?;
+        Ok(())
+    }
+
+    fn parse_diff(diff: &str) -> Result<ParsedDiff> {
+        let mut preamble = Vec::new();
+        let mut hunks = Vec::new();
+        let mut current: Option<DiffHunk> = None;
+
+        for line in diff.lines() {
+            if line.starts_with("@@") {
+                if let Some(h) = current.take() {
+                    hunks.push(h);
+                }
+                let (new_start, new_count) = Self::parse_hunk_header_new_range(line)
+                    .ok_or_else(|| GitError::Parse(format!("Invalid hunk header: {}", line)))?;
+                current = Some(DiffHunk {
+                    header: line.to_string(),
+                    lines: Vec::new(),
+                    new_start,
+                    new_count,
+                });
+            } else if let Some(ref mut h) = current {
+                h.lines.push(line.to_string());
+            } else {
+                preamble.push(line.to_string());
+            }
+        }
+
+        if let Some(h) = current {
+            hunks.push(h);
+        }
+
+        Ok(ParsedDiff { preamble, hunks })
+    }
+
+    fn parse_hunk_header_new_range(header: &str) -> Option<(usize, usize)> {
+        let mut parts = header.split_whitespace();
+        if parts.next()? != "@@" {
+            return None;
+        }
+        let _old = parts.next()?;
+        let new_part = parts.next()?;
+        let new_spec = new_part.strip_prefix('+')?;
+
+        let (start, count) = if let Some((s, c)) = new_spec.split_once(',') {
+            (s.parse().ok()?, c.parse().ok()?)
+        } else {
+            (new_spec.parse().ok()?, 1)
+        };
+        Some((start, count))
+    }
+
+    fn hunk_contains_line(hunk: &DiffHunk, line: usize) -> bool {
+        if hunk.new_count == 0 {
+            return line == hunk.new_start;
+        }
+        let end = hunk
+            .new_start
+            .saturating_add(hunk.new_count.saturating_sub(1));
+        line >= hunk.new_start && line <= end
+    }
+
+    fn hunk_intersects_range(hunk: &DiffHunk, start: usize, end: usize) -> bool {
+        let hunk_start = hunk.new_start;
+        let hunk_end = if hunk.new_count == 0 {
+            hunk.new_start
+        } else {
+            hunk.new_start
+                .saturating_add(hunk.new_count.saturating_sub(1))
+        };
+        hunk_start <= end && hunk_end >= start
+    }
+
+    fn build_patch(parsed: &ParsedDiff, selected_hunks: &[usize]) -> String {
+        let mut patch = String::new();
+        for line in &parsed.preamble {
+            patch.push_str(line);
+            patch.push('\n');
+        }
+        for idx in selected_hunks {
+            if let Some(hunk) = parsed.hunks.get(*idx) {
+                patch.push_str(&hunk.header);
+                patch.push('\n');
+                for line in &hunk.lines {
+                    patch.push_str(line);
+                    patch.push('\n');
+                }
+            }
+        }
+        patch
+    }
+
+    fn index_status_to_change(status: u8) -> Option<ChangeType> {
+        match status {
+            b'A' => Some(ChangeType::Added),
+            b'M' | b'C' | b'T' | b'U' => Some(ChangeType::Modified),
+            b'D' => Some(ChangeType::Deleted),
+            b'R' => Some(ChangeType::Renamed),
+            b' ' | b'?' | b'!' => None,
+            _ => Some(ChangeType::Unknown),
+        }
+    }
+
+    fn worktree_status_to_change(status: u8) -> Option<ChangeType> {
+        match status {
+            b'?' | b'A' => Some(ChangeType::Added),
+            b'M' | b'C' | b'T' | b'U' => Some(ChangeType::Modified),
+            b'D' => Some(ChangeType::Deleted),
+            b'R' => Some(ChangeType::Renamed),
+            b' ' | b'!' => None,
+            _ => Some(ChangeType::Unknown),
+        }
+    }
+
+    fn relative_path_string(&self, file_path: &Path) -> String {
+        file_path
+            .strip_prefix(&self.workdir)
+            .unwrap_or(file_path)
+            .to_string_lossy()
+            .to_string()
     }
 
     /// Generate diff for added-only file (all lines as +)
@@ -502,8 +1112,36 @@ pub enum ChangeType {
 #[derive(Debug, Clone)]
 pub struct ChangedFile {
     pub path: PathBuf,
-    pub change_type: ChangeType,
-    pub staged: bool,
+    pub staged_change: Option<ChangeType>,
+    pub unstaged_change: Option<ChangeType>,
+}
+
+impl ChangedFile {
+    pub fn has_staged_changes(&self) -> bool {
+        self.staged_change.is_some()
+    }
+
+    pub fn has_unstaged_changes(&self) -> bool {
+        self.unstaged_change.is_some()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StashEntry {
+    pub reference: String,
+    pub message: String,
+}
+
+/// Scope of changes to include when pushing a stash.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum StashMode {
+    /// Staged + unstaged tracked changes (default `git stash push`).
+    #[default]
+    All,
+    /// Only staged changes (`--staged`).
+    Staged,
+    /// Staged + unstaged + untracked files (`--include-untracked`).
+    IncludeUntracked,
 }
 
 /// Validate a branch name according to Git rules

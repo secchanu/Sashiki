@@ -2,8 +2,9 @@
 //!
 //! This module implements the custom GPUI Element for rendering terminal content.
 
-use super::TerminalView;
+use super::{TerminalView, input_probe};
 use crate::theme::*;
+use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
     App, Bounds, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, Pixels, Point, SharedString, Size, TextRun,
@@ -61,6 +62,8 @@ pub(super) struct TerminalLayout {
     /// Cell dimensions
     pub cell_width: Pixels,
     pub line_height: Pixels,
+    /// Cursor shape for this render pass
+    pub cursor_shape: CursorShape,
     /// Preedit text if any
     pub preedit_text: String,
 }
@@ -154,6 +157,9 @@ impl Element for TerminalElement {
         let min_width = px(MIN_ELEMENT_WIDTH);
         let min_height = px(MIN_ELEMENT_HEIGHT);
         if bounds.size.width < min_width || bounds.size.height < min_height {
+            self.view.update(cx, |view, _cx| {
+                view.input_cursor_bounds = None;
+            });
             return TerminalPrepaintState {
                 layout: None,
                 text_style,
@@ -184,8 +190,18 @@ impl Element for TerminalElement {
             view.content_origin = (origin_x, origin_y);
         });
 
-        // Build layout data from terminal grid
-        let layout = self.view.read(cx).build_layout(cell_width, line_height);
+        // Build layout data from terminal grid.
+        let layout_origin = Point::new(bounds.origin.x + padding, bounds.origin.y + padding);
+        let (layout, cursor_bounds) = {
+            let view = self.view.read(cx);
+            let layout = view.build_layout(cell_width, line_height);
+            let cursor_bounds =
+                view.compute_input_cursor_bounds(layout_origin, cell_width, line_height);
+            (layout, cursor_bounds)
+        };
+        self.view.update(cx, |view, _cx| {
+            view.input_cursor_bounds = cursor_bounds;
+        });
 
         TerminalPrepaintState {
             layout,
@@ -224,13 +240,12 @@ impl Element for TerminalElement {
 
         // Set up input handler
         let focus_handle = self.view.read(cx).focus_handle.clone();
-        if focus_handle.is_focused(window) {
-            window.handle_input(
-                &focus_handle,
-                ElementInputHandler::new(bounds, self.view.clone()),
-                cx,
-            );
-        }
+        input_probe::ensure_window_uia_bridge(window);
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.view.clone()),
+            cx,
+        );
     }
 }
 
@@ -274,10 +289,8 @@ impl TerminalElement {
                     },
                 );
 
-                // Paint background
-                let bg_color = if cell.is_cursor {
-                    Some(Hsla::from(rgb(ROSEWATER)))
-                } else if cell.is_selected {
+                // Paint base background first (selection or cell background).
+                let bg_color = if cell.is_selected {
                     Some(Hsla::from(rgb(BLUE)))
                 } else {
                     cell.bg
@@ -287,9 +300,87 @@ impl TerminalElement {
                     window.paint_quad(fill(cell_bounds, bg));
                 }
 
+                // Paint cursor overlay according to configured shape.
+                if cell.is_cursor {
+                    let cursor_color = Hsla::from(rgb(ROSEWATER));
+                    match layout.cursor_shape {
+                        CursorShape::Block => {
+                            window.paint_quad(fill(cell_bounds, cursor_color));
+                        }
+                        CursorShape::Hidden => {
+                            // Cursor is invisible.
+                        }
+                        CursorShape::Underline => {
+                            let thickness = px(2.0);
+                            let underline_bounds = Bounds::new(
+                                Point::new(x, y + line_height - thickness),
+                                Size {
+                                    width: render_width,
+                                    height: thickness,
+                                },
+                            );
+                            window.paint_quad(fill(underline_bounds, cursor_color));
+                        }
+                        CursorShape::Beam => {
+                            let thickness = px(2.0);
+                            let beam_bounds = Bounds::new(
+                                Point::new(x, y),
+                                Size {
+                                    width: thickness,
+                                    height: line_height,
+                                },
+                            );
+                            window.paint_quad(fill(beam_bounds, cursor_color));
+                        }
+                        CursorShape::HollowBlock => {
+                            let thickness = px(1.0);
+                            let top = Bounds::new(
+                                Point::new(x, y),
+                                Size {
+                                    width: render_width,
+                                    height: thickness,
+                                },
+                            );
+                            let bottom = Bounds::new(
+                                Point::new(x, y + line_height - thickness),
+                                Size {
+                                    width: render_width,
+                                    height: thickness,
+                                },
+                            );
+                            let left = Bounds::new(
+                                Point::new(x, y),
+                                Size {
+                                    width: thickness,
+                                    height: line_height,
+                                },
+                            );
+                            let right = Bounds::new(
+                                Point::new(x + render_width - thickness, y),
+                                Size {
+                                    width: thickness,
+                                    height: line_height,
+                                },
+                            );
+
+                            window.paint_quad(fill(top, cursor_color));
+                            window.paint_quad(fill(bottom, cursor_color));
+                            window.paint_quad(fill(left, cursor_color));
+                            window.paint_quad(fill(right, cursor_color));
+                        }
+                    }
+                }
+
                 // Paint character
                 if cell.c != ' ' {
-                    let fg_color = if cell.is_cursor || cell.is_selected {
+                    let is_block_cursor =
+                        cell.is_cursor && matches!(layout.cursor_shape, CursorShape::Block);
+                    let is_hidden_cursor =
+                        cell.is_cursor && matches!(layout.cursor_shape, CursorShape::Hidden);
+
+                    let fg_color = if is_block_cursor
+                        || (cell.is_selected && (!cell.is_cursor || is_hidden_cursor))
+                    {
                         Hsla::from(rgb(BG_BASE))
                     } else if cell.is_url_hovered {
                         Hsla::from(rgb(TEAL))

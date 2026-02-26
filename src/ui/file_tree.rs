@@ -21,13 +21,17 @@ pub enum FileListMode {
     AllFiles,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeSection {
+    Staged,
+    Unstaged,
+}
+
 /// Git change information for a file
 #[derive(Debug, Clone, Copy)]
 pub struct ChangeInfo {
     pub change_type: ChangeType,
-    /// Whether the change is staged (for future use in staging UI)
-    #[allow(dead_code)]
-    pub staged: bool,
+    pub section: ChangeSection,
 }
 
 /// File tree node for tree view
@@ -235,7 +239,7 @@ mod tests {
     fn test_file_tree_node_with_change_info() {
         let change_info = ChangeInfo {
             change_type: ChangeType::Modified,
-            staged: false,
+            section: ChangeSection::Unstaged,
         };
         let files = vec![(PathBuf::from("modified.txt"), Some(change_info))];
         let tree = FileTreeNode::from_files(files);
@@ -245,7 +249,7 @@ mod tests {
         assert!(file.change_info.is_some());
         let info = file.change_info.unwrap();
         assert_eq!(info.change_type, ChangeType::Modified);
-        assert!(!info.staged);
+        assert_eq!(info.section, ChangeSection::Unstaged);
     }
 
     #[test]
