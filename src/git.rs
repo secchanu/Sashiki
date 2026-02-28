@@ -36,6 +36,7 @@ pub struct Worktree {
 /// Git config key constants for session template
 pub const CONFIG_PRE_CREATE_CMD: &str = "sashiki.template.preCreateCommand";
 pub const CONFIG_FILE_COPY: &str = "sashiki.template.fileCopy";
+pub const CONFIG_FILE_SYNC: &str = "sashiki.template.fileSync";
 pub const CONFIG_POST_CREATE_CMD: &str = "sashiki.template.postCreateCommand";
 pub const CONFIG_WORKING_DIR: &str = "sashiki.template.workingDirectory";
 

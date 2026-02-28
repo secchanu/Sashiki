@@ -65,10 +65,16 @@ pub struct SashikiApp {
     pub(crate) show_file_view: bool,
     pub(crate) active_dialog: ActiveDialog,
     pub(crate) create_branch_input: String,
+    pub(crate) create_branch_cursor: usize,
+    pub(crate) create_branch_selection_anchor: Option<usize>,
     pub(crate) commit_message_input: String,
+    pub(crate) commit_message_cursor: usize,
+    pub(crate) commit_message_selection_anchor: Option<usize>,
     /// true when the commit dialog is being used to amend the last commit
     pub(crate) commit_amend_mode: bool,
     pub(crate) stash_message_input: String,
+    pub(crate) stash_message_cursor: usize,
+    pub(crate) stash_message_selection_anchor: Option<usize>,
     pub(crate) stash_entries: Vec<crate::git::StashEntry>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) create_dialog_focus: FocusHandle,
@@ -77,10 +83,12 @@ pub struct SashikiApp {
     /// Template config being edited in the settings dialog
     pub(crate) template_edit: Option<TemplateConfig>,
     /// Input fields for template settings dialog (one per section, newline-delimited)
-    pub(crate) settings_inputs: [String; 4],
+    pub(crate) settings_inputs: [String; 5],
     /// Cursor position (char index) per section
-    pub(crate) settings_cursors: [usize; 4],
-    /// Which section is active in settings (0=pre, 1=copy, 2=post, 3=workdir)
+    pub(crate) settings_cursors: [usize; 5],
+    /// Selection anchor (char index) per section
+    pub(crate) settings_selection_anchors: [Option<usize>; 5],
+    /// Which section is active in settings (0=pre, 1=copy, 2=sync, 3=post, 4=workdir)
     pub(crate) settings_active_section: usize,
     pub(crate) settings_dialog_focus: FocusHandle,
     /// Which menu dropdown is currently open (None = all closed)
@@ -188,9 +196,15 @@ impl SashikiApp {
             show_file_view: false,
             active_dialog,
             create_branch_input: String::new(),
+            create_branch_cursor: 0,
+            create_branch_selection_anchor: None,
             commit_message_input: String::new(),
+            commit_message_cursor: 0,
+            commit_message_selection_anchor: None,
             commit_amend_mode: false,
             stash_message_input: String::new(),
+            stash_message_cursor: 0,
+            stash_message_selection_anchor: None,
             stash_entries: Vec::new(),
             focus_handle,
             create_dialog_focus,
@@ -199,6 +213,7 @@ impl SashikiApp {
             template_edit: None,
             settings_inputs: Default::default(),
             settings_cursors: Default::default(),
+            settings_selection_anchors: Default::default(),
             settings_active_section: 0,
             settings_dialog_focus: cx.focus_handle(),
             open_menu: None,
@@ -306,12 +321,21 @@ impl SashikiApp {
         self.active_dialog = ActiveDialog::None;
         self.open_menu = None;
         self.create_branch_input.clear();
+        self.create_branch_cursor = 0;
+        self.create_branch_selection_anchor = None;
         self.commit_message_input.clear();
+        self.commit_message_cursor = 0;
+        self.commit_message_selection_anchor = None;
         self.stash_message_input.clear();
+        self.stash_message_cursor = 0;
+        self.stash_message_selection_anchor = None;
         self.stash_entries.clear();
         self.stash_entry_files.clear();
         self.stash_expanded_entries.clear();
         self.stash_mode = crate::git::StashMode::default();
+        self.settings_inputs = Default::default();
+        self.settings_cursors = Default::default();
+        self.settings_selection_anchors = Default::default();
 
         // 5. Initialize repository and sessions for the selected project.
         self.git_repo = Some(repo);

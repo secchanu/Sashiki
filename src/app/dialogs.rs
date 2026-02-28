@@ -12,13 +12,21 @@ impl SashikiApp {
     pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_dialog = ActiveDialog::CreateWorktree;
         self.create_branch_input.clear();
-        window.focus(&self.create_dialog_focus, cx);
+        self.create_branch_cursor = 0;
+        self.create_branch_selection_anchor = None;
         cx.notify();
+        // Focus on the next frame so track_focus has registered in the tree.
+        cx.on_next_frame(window, |this, window, cx| {
+            window.focus(&this.create_dialog_focus, cx);
+            cx.notify();
+        });
     }
 
     pub fn close_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_dialog = ActiveDialog::None;
         self.create_branch_input.clear();
+        self.create_branch_cursor = 0;
+        self.create_branch_selection_anchor = None;
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -53,8 +61,14 @@ impl SashikiApp {
         self.commit_amend_mode = false;
         self.active_dialog = ActiveDialog::Commit;
         self.commit_message_input.clear();
-        window.focus(&self.commit_dialog_focus, cx);
+        self.commit_message_cursor = 0;
+        self.commit_message_selection_anchor = None;
         cx.notify();
+        // Focus on the next frame so track_focus has registered in the tree.
+        cx.on_next_frame(window, |this, window, cx| {
+            window.focus(&this.commit_dialog_focus, cx);
+            cx.notify();
+        });
     }
 
     /// Open the commit dialog pre-configured for amending the last commit.
@@ -72,14 +86,22 @@ impl SashikiApp {
         self.commit_amend_mode = true;
         self.active_dialog = ActiveDialog::Commit;
         self.commit_message_input = last_msg;
-        window.focus(&self.commit_dialog_focus, cx);
+        self.commit_message_cursor = self.commit_message_input.chars().count();
+        self.commit_message_selection_anchor = None;
         cx.notify();
+        // Focus on the next frame so track_focus has registered in the tree.
+        cx.on_next_frame(window, |this, window, cx| {
+            window.focus(&this.commit_dialog_focus, cx);
+            cx.notify();
+        });
     }
 
     pub fn close_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_dialog = ActiveDialog::None;
         self.commit_amend_mode = false;
         self.commit_message_input.clear();
+        self.commit_message_cursor = 0;
+        self.commit_message_selection_anchor = None;
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -171,9 +193,15 @@ impl SashikiApp {
                 self.stash_entries = entries;
                 self.stash_expanded_entries.clear();
                 self.stash_message_input.clear();
+                self.stash_message_cursor = 0;
+                self.stash_message_selection_anchor = None;
                 self.active_dialog = ActiveDialog::Stash;
-                window.focus(&self.stash_dialog_focus, cx);
                 cx.notify();
+                // Focus on the next frame so track_focus has registered in the tree.
+                cx.on_next_frame(window, |this, window, cx| {
+                    window.focus(&this.stash_dialog_focus, cx);
+                    cx.notify();
+                });
             }
             Err(e) => {
                 self.active_dialog = ActiveDialog::Error {
@@ -187,6 +215,8 @@ impl SashikiApp {
     pub fn close_stash_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_dialog = ActiveDialog::None;
         self.stash_message_input.clear();
+        self.stash_message_cursor = 0;
+        self.stash_message_selection_anchor = None;
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -212,6 +242,8 @@ impl SashikiApp {
         match result {
             Ok(()) => {
                 self.stash_message_input.clear();
+                self.stash_message_cursor = 0;
+                self.stash_message_selection_anchor = None;
                 self.refresh_file_list_async(cx);
                 self.refresh_stash_entries(cx);
             }
@@ -369,6 +401,8 @@ impl SashikiApp {
 
         // Close create dialog state (branch input is no longer needed)
         self.create_branch_input.clear();
+        self.create_branch_cursor = 0;
+        self.create_branch_selection_anchor = None;
 
         // Spawn async creation pipeline
         cx.spawn(async move |entity, cx| {
@@ -394,7 +428,7 @@ impl SashikiApp {
         .detach();
     }
 
-    /// Async creation pipeline: pre-create -> worktree -> file copy -> post-create
+    /// Async creation pipeline: pre-create -> worktree -> file copy -> file sync -> post-create
     async fn run_creation_pipeline(
         entity: &gpui::WeakEntity<Self>,
         cx: &mut gpui::AsyncApp,
@@ -509,7 +543,70 @@ impl SashikiApp {
             });
         }
 
-        // --- Phase 4: Post-create commands ---
+        // --- Phase 4: Sync files ---
+        if !template.file_syncs.is_empty() {
+            let src = main_workdir.clone();
+            let dst = worktree_path.clone();
+            let tmpl = template.clone();
+
+            let sync_results = smol::unblock(move || tmpl.sync_files(&src, &dst)).await;
+
+            // Check for hard errors
+            let errors: Vec<_> = sync_results.iter().filter(|r| !r.success).collect();
+            if !errors.is_empty() {
+                let msg = errors
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}: {}",
+                            r.path,
+                            r.error.as_deref().unwrap_or("unknown error")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                eprintln!("Warning: some file syncs failed:\n{}", msg);
+                // Continue despite sync errors (non-fatal)
+            }
+
+            // Report fallback usage for visibility
+            let fallback_results: Vec<_> = sync_results.iter().filter(|r| r.copied_instead).collect();
+            if !fallback_results.is_empty() {
+                let msg = fallback_results
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}: {}",
+                            r.path,
+                            r.error
+                                .as_deref()
+                                .unwrap_or("hard-link failed, copied instead")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                eprintln!(
+                    "Warning: {} file(s) could not be hard-linked and were copied instead:\n{}",
+                    fallback_results.len(),
+                    msg
+                );
+            }
+
+            step_index += 1;
+            let step = step_index;
+            let _ = entity.update(cx, |app, cx| {
+                if let ActiveDialog::Creating {
+                    ref mut current_step,
+                    ..
+                } = app.active_dialog
+                {
+                    *current_step = step;
+                }
+                cx.notify();
+            });
+        }
+
+        // --- Phase 5: Post-create commands ---
         let effective_workdir = template.resolve_working_directory(&worktree_path);
 
         for cmd in &template.post_create_commands {
@@ -666,8 +763,11 @@ impl SashikiApp {
     pub fn cancel_smart_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Return user to the commit dialog they were in
         self.active_dialog = ActiveDialog::Commit;
-        window.focus(&self.commit_dialog_focus, cx);
         cx.notify();
+        cx.on_next_frame(window, |this, window, cx| {
+            window.focus(&this.commit_dialog_focus, cx);
+            cx.notify();
+        });
     }
 
     // === Amend Commit Confirm ===
@@ -699,8 +799,11 @@ impl SashikiApp {
 
     pub fn cancel_amend_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_dialog = ActiveDialog::Commit;
-        window.focus(&self.commit_dialog_focus, cx);
         cx.notify();
+        cx.on_next_frame(window, |this, window, cx| {
+            window.focus(&this.commit_dialog_focus, cx);
+            cx.notify();
+        });
     }
 
     // === Discard Hunk Confirm ===
@@ -987,6 +1090,7 @@ impl SashikiApp {
         self.settings_inputs = [
             template.pre_create_commands.join("\n"),
             template.file_copies.join("\n"),
+            template.file_syncs.join("\n"),
             template.post_create_commands.join("\n"),
             template.working_directory.clone().unwrap_or_default(),
         ];
@@ -995,9 +1099,11 @@ impl SashikiApp {
             self.settings_inputs[1].chars().count(),
             self.settings_inputs[2].chars().count(),
             self.settings_inputs[3].chars().count(),
+            self.settings_inputs[4].chars().count(),
         ];
         self.template_edit = Some(template);
         self.settings_active_section = 0;
+        self.settings_selection_anchors = Default::default();
         self.active_dialog = ActiveDialog::TemplateSettings;
         cx.notify();
         // Focus on the next frame so track_focus has registered the handle
@@ -1012,6 +1118,7 @@ impl SashikiApp {
         self.template_edit = None;
         self.settings_inputs = Default::default();
         self.settings_cursors = Default::default();
+        self.settings_selection_anchors = Default::default();
         self.active_dialog = ActiveDialog::None;
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
@@ -1031,8 +1138,9 @@ impl SashikiApp {
         if let Some(ref mut template) = self.template_edit {
             template.pre_create_commands = parse_lines(&self.settings_inputs[0]);
             template.file_copies = parse_lines(&self.settings_inputs[1]);
-            template.post_create_commands = parse_lines(&self.settings_inputs[2]);
-            let workdir = self.settings_inputs[3].trim().to_string();
+            template.file_syncs = parse_lines(&self.settings_inputs[2]);
+            template.post_create_commands = parse_lines(&self.settings_inputs[3]);
+            let workdir = self.settings_inputs[4].trim().to_string();
             template.working_directory = if workdir.is_empty() {
                 None
             } else {
@@ -1056,6 +1164,7 @@ impl SashikiApp {
         self.template_edit = None;
         self.settings_inputs = Default::default();
         self.settings_cursors = Default::default();
+        self.settings_selection_anchors = Default::default();
         self.active_dialog = ActiveDialog::None;
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);

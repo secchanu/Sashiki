@@ -3,6 +3,7 @@
 //! Defines what happens when a new worktree/session is created:
 //! - Pre-create commands (run in the main worktree before creation)
 //! - File copies (glob patterns copied from main worktree to new)
+//! - File syncs (glob patterns hard-linked from main worktree to new)
 //! - Post-create commands (run in the new worktree after creation)
 //! - Working directory (relative to worktree root)
 //!
@@ -18,6 +19,8 @@ pub struct TemplateConfig {
     pub pre_create_commands: Vec<String>,
     /// Glob patterns for files to copy from main worktree
     pub file_copies: Vec<String>,
+    /// Glob patterns for files to sync from main worktree
+    pub file_syncs: Vec<String>,
     /// Commands to run after worktree creation (in new worktree)
     pub post_create_commands: Vec<String>,
     /// Working directory relative to worktree root (for terminal and post-create commands)
@@ -30,6 +33,7 @@ impl TemplateConfig {
         Self {
             pre_create_commands: repo.get_config_values(git::CONFIG_PRE_CREATE_CMD),
             file_copies: repo.get_config_values(git::CONFIG_FILE_COPY),
+            file_syncs: repo.get_config_values(git::CONFIG_FILE_SYNC),
             post_create_commands: repo.get_config_values(git::CONFIG_POST_CREATE_CMD),
             working_directory: repo.get_config_value(git::CONFIG_WORKING_DIR),
         }
@@ -39,6 +43,7 @@ impl TemplateConfig {
     pub fn save(&self, repo: &GitRepo) -> git::Result<()> {
         repo.set_config_values(git::CONFIG_PRE_CREATE_CMD, &self.pre_create_commands)?;
         repo.set_config_values(git::CONFIG_FILE_COPY, &self.file_copies)?;
+        repo.set_config_values(git::CONFIG_FILE_SYNC, &self.file_syncs)?;
         repo.set_config_values(git::CONFIG_POST_CREATE_CMD, &self.post_create_commands)?;
 
         if let Some(ref dir) = self.working_directory {
@@ -59,6 +64,7 @@ impl TemplateConfig {
     pub fn is_empty(&self) -> bool {
         self.pre_create_commands.is_empty()
             && self.file_copies.is_empty()
+            && self.file_syncs.is_empty()
             && self.post_create_commands.is_empty()
     }
 
@@ -82,6 +88,10 @@ impl TemplateConfig {
 
         if !self.file_copies.is_empty() {
             steps.push("Copying files".to_string());
+        }
+
+        if !self.file_syncs.is_empty() {
+            steps.push("Synchronizing files".to_string());
         }
 
         for cmd in &self.post_create_commands {
@@ -134,6 +144,53 @@ impl TemplateConfig {
 
         results
     }
+
+    /// Sync files matching glob patterns from source to destination worktree.
+    /// Uses hard links when possible, and falls back to copy on link failure.
+    pub fn sync_files(&self, source_root: &Path, dest_root: &Path) -> Vec<FileSyncResult> {
+        let mut results = Vec::new();
+
+        for pattern in &self.file_syncs {
+            let full_pattern = source_root.join(pattern).to_string_lossy().to_string();
+
+            match glob::glob(&full_pattern) {
+                Ok(paths) => {
+                    let mut matched = false;
+                    for entry in paths {
+                        match entry {
+                            Ok(src_path) if src_path.is_file() => {
+                                matched = true;
+                                let result = sync_single_file(source_root, dest_root, &src_path);
+                                results.push(result);
+                            }
+                            Ok(_) => {} // skip directories
+                            Err(e) => {
+                                results.push(FileSyncResult {
+                                    path: pattern.clone(),
+                                    success: false,
+                                    copied_instead: false,
+                                    error: Some(format!("Glob error: {}", e)),
+                                });
+                            }
+                        }
+                    }
+                    if !matched {
+                        // Pattern matched no files - not an error, just skip
+                    }
+                }
+                Err(e) => {
+                    results.push(FileSyncResult {
+                        path: pattern.clone(),
+                        success: false,
+                        copied_instead: false,
+                        error: Some(format!("Invalid pattern '{}': {}", pattern, e)),
+                    });
+                }
+            }
+        }
+
+        results
+    }
 }
 
 /// Result of a single file copy operation
@@ -141,6 +198,16 @@ impl TemplateConfig {
 pub struct FileCopyResult {
     pub path: String,
     pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Result of a single file sync operation
+#[derive(Debug, Clone)]
+pub struct FileSyncResult {
+    pub path: String,
+    pub success: bool,
+    /// true when hard-link sync failed and copy fallback was used
+    pub copied_instead: bool,
     pub error: Option<String>,
 }
 
@@ -190,6 +257,76 @@ fn copy_single_file(source_root: &Path, dest_root: &Path, src_path: &Path) -> Fi
             path: rel_str,
             success: false,
             error: Some(format!("Copy failed: {}", e)),
+        },
+    }
+}
+
+/// Sync a single file from source worktree to destination worktree.
+/// Uses hard-link and falls back to copy if linking fails.
+fn sync_single_file(source_root: &Path, dest_root: &Path, src_path: &Path) -> FileSyncResult {
+    let relative = match src_path.strip_prefix(source_root) {
+        Ok(r) => r,
+        Err(_) => {
+            return FileSyncResult {
+                path: src_path.to_string_lossy().to_string(),
+                success: false,
+                copied_instead: false,
+                error: Some("Failed to determine relative path".to_string()),
+            };
+        }
+    };
+
+    let dest_path = dest_root.join(relative);
+    let rel_str = relative.to_string_lossy().to_string();
+
+    // Don't overwrite existing files
+    if dest_path.exists() {
+        return FileSyncResult {
+            path: rel_str,
+            success: true,
+            copied_instead: false,
+            error: None,
+        };
+    }
+
+    // Create parent directories
+    if let Some(parent) = dest_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return FileSyncResult {
+                path: rel_str,
+                success: false,
+                copied_instead: false,
+                error: Some(format!("Failed to create directory: {}", e)),
+            };
+        }
+    }
+
+    match std::fs::hard_link(src_path, &dest_path) {
+        Ok(_) => FileSyncResult {
+            path: rel_str,
+            success: true,
+            copied_instead: false,
+            error: None,
+        },
+        Err(link_err) => match std::fs::copy(src_path, &dest_path) {
+            Ok(_) => FileSyncResult {
+                path: rel_str,
+                success: true,
+                copied_instead: true,
+                error: Some(format!(
+                    "Hard-link failed ({}), copied instead",
+                    link_err
+                )),
+            },
+            Err(copy_err) => FileSyncResult {
+                path: rel_str,
+                success: false,
+                copied_instead: false,
+                error: Some(format!(
+                    "Hard-link failed: {}; copy fallback failed: {}",
+                    link_err, copy_err
+                )),
+            },
         },
     }
 }
