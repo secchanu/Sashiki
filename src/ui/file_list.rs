@@ -1,7 +1,7 @@
 //! File list rendering
 
 use crate::app::SashikiApp;
-use crate::git::{ChangedFile, ChangeType};
+use crate::git::{ChangeType, ChangedFile};
 use crate::theme::*;
 use crate::ui::{ChangeInfo, ChangeSection, FileListMode, FileTreeNode, read_dir_shallow};
 use gpui::{
@@ -126,8 +126,7 @@ impl SashikiApp {
                                         .text_xs()
                                         .text_color(rgb(TEXT_MUTED))
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.changes_view_is_tree =
-                                                !this.changes_view_is_tree;
+                                            this.changes_view_is_tree = !this.changes_view_is_tree;
                                             cx.notify();
                                         }))
                                         // ツリー時は「≡」(リストに切り替え)、リスト時は「⊟」(ツリーに切り替え)
@@ -185,12 +184,7 @@ impl SashikiApp {
                                                 .child("Commit"),
                                         )
                                         // セパレータ
-                                        .child(
-                                            div()
-                                                .w_px()
-                                                .h_3()
-                                                .bg(rgb(BG_SURFACE1)),
-                                        )
+                                        .child(div().w_px().h_3().bg(rgb(BG_SURFACE1)))
                                         // ▾ ドロップダウントグル
                                         .child(
                                             div()
@@ -287,8 +281,7 @@ impl SashikiApp {
                     .items_center()
                     .justify_between()
                     .on_mouse_move(cx.listener(|this, _: &gpui::MouseMoveEvent, _, cx| {
-                        if this.hovered_file_path.is_some() || this.hovered_file_section.is_some()
-                        {
+                        if this.hovered_file_path.is_some() || this.hovered_file_section.is_some() {
                             this.hovered_file_path = None;
                             this.hovered_file_section = None;
                             cx.notify();
@@ -401,18 +394,32 @@ impl SashikiApp {
                     // ツリービュー: ディレクトリ構造を展開して表示
                     let tree_files = self.changed_files.iter().filter_map(|f| match section {
                         ChangeSection::Staged => f.staged_change.map(|ct| {
-                            (f.path.clone(), Some(ChangeInfo { change_type: ct, section }))
+                            (
+                                f.path.clone(),
+                                Some(ChangeInfo {
+                                    change_type: ct,
+                                    section,
+                                }),
+                            )
                         }),
                         ChangeSection::Unstaged => f.unstaged_change.map(|ct| {
-                            (f.path.clone(), Some(ChangeInfo { change_type: ct, section }))
+                            (
+                                f.path.clone(),
+                                Some(ChangeInfo {
+                                    change_type: ct,
+                                    section,
+                                }),
+                            )
                         }),
                     });
                     let tree = FileTreeNode::from_files(tree_files);
-                    el.child(div().children(
-                        tree.children
-                            .iter()
-                            .map(|node| self.render_tree_node(node, 0, section, cx)),
-                    ))
+                    el.child(
+                        div().children(
+                            tree.children
+                                .iter()
+                                .map(|node| self.render_tree_node(node, 0, section, cx)),
+                        ),
+                    )
                 } else {
                     // フラットリスト: 全ファイルをパス順に表示
                     let rows: Vec<AnyElement> = self
@@ -695,9 +702,9 @@ impl SashikiApp {
                     .text_xs()
                     .text_color(if is_staged { rgb(BLUE) } else { rgb(GREEN) })
                     .hover(|b| {
-                        b.rounded_sm().bg(rgb(BG_SURFACE1)).text_color(
-                            if is_staged { rgb(BLUE) } else { rgb(GREEN) },
-                        )
+                        b.rounded_sm()
+                            .bg(rgb(BG_SURFACE1))
+                            .text_color(if is_staged { rgb(BLUE) } else { rgb(GREEN) })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_dir_staging(stage_path.clone(), is_staged, cx);
@@ -713,8 +720,7 @@ impl SashikiApp {
 
             if is_expanded {
                 for child in &node.children {
-                    result =
-                        result.child(self.render_tree_node(child, depth + 1, section, cx));
+                    result = result.child(self.render_tree_node(child, depth + 1, section, cx));
                 }
             }
         } else {
@@ -843,9 +849,9 @@ impl SashikiApp {
                     .text_xs()
                     .text_color(if is_staged { rgb(BLUE) } else { rgb(GREEN) })
                     .hover(|b| {
-                        b.rounded_sm().bg(rgb(BG_SURFACE1)).text_color(
-                            if is_staged { rgb(BLUE) } else { rgb(GREEN) },
-                        )
+                        b.rounded_sm()
+                            .bg(rgb(BG_SURFACE1))
+                            .text_color(if is_staged { rgb(BLUE) } else { rgb(GREEN) })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_file_staging(stage_path.clone(), is_staged, cx);

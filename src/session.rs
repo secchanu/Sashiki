@@ -571,6 +571,11 @@ impl SessionManager {
         self.layout_mode
     }
 
+    /// Set layout mode directly.
+    pub fn set_layout_mode(&mut self, layout_mode: LayoutMode) {
+        self.layout_mode = layout_mode;
+    }
+
     /// Toggle between Single and Parallel mode
     pub fn toggle_layout_mode(&mut self) {
         self.layout_mode = match self.layout_mode {
@@ -583,6 +588,20 @@ impl SessionManager {
     pub fn toggle_parallel_visibility(&mut self, index: usize) {
         if let Some(session) = self.sessions.get_mut(index) {
             session.toggle_visibility();
+        }
+    }
+
+    /// Restore parallel visibility from persisted worktree paths.
+    pub fn set_parallel_visibility_by_paths(
+        &mut self,
+        visible_paths: &std::collections::HashSet<std::path::PathBuf>,
+    ) {
+        for session in &mut self.sessions {
+            let visible = visible_paths.contains(session.worktree_path());
+            session.set_visible_in_parallel(visible);
+        }
+        if let Some(active) = self.sessions.get_mut(self.active_index) {
+            active.set_visible_in_parallel(true);
         }
     }
 
@@ -615,6 +634,300 @@ impl SessionManager {
     #[allow(dead_code)]
     pub fn total_terminal_count(&self) -> usize {
         self.sessions.iter().map(|s| s.terminal_count()).sum()
+    }
+}
+
+/// 1つのプロジェクト（gitリポジトリ）とそのセッション群を保持する
+pub struct SessionGroup {
+    name: String,
+    project_path: std::path::PathBuf,
+    pub(crate) session_manager: SessionManager,
+    pub(crate) git_repo: crate::git::GitRepo,
+    expanded: bool,
+}
+
+impl SessionGroup {
+    pub fn new(
+        name: String,
+        project_path: std::path::PathBuf,
+        git_repo: crate::git::GitRepo,
+    ) -> Self {
+        Self {
+            name,
+            project_path,
+            session_manager: SessionManager::new(),
+            git_repo,
+            expanded: false,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn project_path(&self) -> &std::path::Path {
+        &self.project_path
+    }
+
+    pub fn git_repo(&self) -> &crate::git::GitRepo {
+        &self.git_repo
+    }
+
+    pub fn is_expanded(&self) -> bool {
+        self.expanded
+    }
+
+    pub fn toggle_expanded(&mut self) {
+        self.expanded = !self.expanded;
+    }
+
+    pub fn set_expanded(&mut self, v: bool) {
+        self.expanded = v;
+    }
+}
+
+/// 複数のセッショングループを管理する
+#[derive(Default)]
+pub struct SessionGroupManager {
+    groups: Vec<SessionGroup>,
+    active_group_index: usize,
+}
+
+impl SessionGroupManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // === グループ操作 ===
+
+    pub fn groups(&self) -> &[SessionGroup] {
+        &self.groups
+    }
+
+    pub fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    pub fn active_group_index(&self) -> usize {
+        self.active_group_index
+    }
+
+    pub fn active_group(&self) -> Option<&SessionGroup> {
+        self.groups.get(self.active_group_index)
+    }
+
+    pub fn active_group_mut(&mut self) -> Option<&mut SessionGroup> {
+        self.groups.get_mut(self.active_group_index)
+    }
+
+    pub fn add_group(&mut self, group: SessionGroup) -> usize {
+        let index = self.groups.len();
+        self.groups.push(group);
+        index
+    }
+
+    pub fn remove_group(&mut self, index: usize) {
+        if index >= self.groups.len() {
+            return;
+        }
+        self.groups.remove(index);
+        if index < self.active_group_index {
+            self.active_group_index -= 1;
+        } else if index == self.active_group_index && self.active_group_index >= self.groups.len() {
+            self.active_group_index = self.groups.len().saturating_sub(1);
+        }
+    }
+
+    pub fn switch_group(&mut self, index: usize) {
+        if index < self.groups.len() {
+            self.active_group_index = index;
+        }
+    }
+
+    pub fn find_group_by_path(&self, path: &std::path::Path) -> Option<usize> {
+        self.groups.iter().position(|g| g.project_path() == path)
+    }
+
+    pub fn toggle_group_expanded(&mut self, index: usize) {
+        if let Some(g) = self.groups.get_mut(index) {
+            g.toggle_expanded();
+        }
+    }
+
+    pub fn active_git_repo(&self) -> Option<&crate::git::GitRepo> {
+        self.groups
+            .get(self.active_group_index)
+            .map(|g| &g.git_repo)
+    }
+
+    // === SessionManager への委譲メソッド（既存コールサイト互換） ===
+
+    pub fn sessions(&self) -> &[Session] {
+        self.active_group()
+            .map(|g| g.session_manager.sessions())
+            .unwrap_or(&[])
+    }
+
+    pub fn active_session(&self) -> Option<&Session> {
+        self.active_group()?.session_manager.active_session()
+    }
+
+    pub fn active_terminal(&self) -> Option<gpui::Entity<crate::terminal::TerminalView>> {
+        self.active_group()?.session_manager.active_terminal()
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active_group()
+            .map(|g| g.session_manager.active_index())
+            .unwrap_or(0)
+    }
+
+    pub fn layout_mode(&self) -> LayoutMode {
+        self.active_group()
+            .map(|g| g.session_manager.layout_mode())
+            .unwrap_or_default()
+    }
+
+    pub fn toggle_layout_mode(&mut self) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.toggle_layout_mode();
+        }
+    }
+
+    pub fn switch_to(&mut self, index: usize) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.switch_to(index);
+        }
+    }
+
+    pub fn next_session(&mut self) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.next_session();
+        }
+    }
+
+    pub fn prev_session(&mut self) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.prev_session();
+        }
+    }
+
+    pub fn parallel_sessions(&self) -> Vec<(usize, &Session)> {
+        self.active_group()
+            .map(|g| g.session_manager.parallel_sessions())
+            .unwrap_or_default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.active_group()
+            .map(|g| g.session_manager.is_empty())
+            .unwrap_or(true)
+    }
+
+    pub fn len(&self) -> usize {
+        self.active_group()
+            .map(|g| g.session_manager.len())
+            .unwrap_or(0)
+    }
+
+    pub fn running_session_count(&self) -> usize {
+        self.active_group()
+            .map(|g| g.session_manager.running_session_count())
+            .unwrap_or(0)
+    }
+
+    pub fn toggle_parallel_visibility(&mut self, index: usize) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.toggle_parallel_visibility(index);
+        }
+    }
+
+    pub fn find_session_by_path(&self, path: &std::path::Path) -> Option<usize> {
+        self.active_group()?
+            .session_manager
+            .find_session_by_path(path)
+    }
+
+    pub fn init_from_worktrees(&mut self, worktrees: Vec<crate::git::Worktree>) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.init_from_worktrees(worktrees);
+        }
+    }
+
+    pub fn sync_with_worktrees(
+        &mut self,
+        worktrees: Vec<crate::git::Worktree>,
+    ) -> (usize, usize, usize) {
+        self.active_group_mut()
+            .map(|g| g.session_manager.sync_with_worktrees(worktrees))
+            .unwrap_or((0, 0, 0))
+    }
+
+    pub fn add_session(&mut self, worktree: crate::git::Worktree) -> bool {
+        self.active_group_mut()
+            .map(|g| g.session_manager.add_session(worktree))
+            .unwrap_or(false)
+    }
+
+    pub fn remove_session(&mut self, index: usize) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.remove_session(index);
+        }
+    }
+
+    pub fn ensure_session_terminal<V: 'static>(&mut self, index: usize, cx: &mut gpui::Context<V>) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.ensure_session_terminal(index, cx);
+        }
+    }
+
+    pub fn ensure_active_session_terminal<V: 'static>(&mut self, cx: &mut gpui::Context<V>) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.ensure_active_session_terminal(cx);
+        }
+    }
+
+    pub fn ensure_active_session_terminal_in<V: 'static>(
+        &mut self,
+        dir: std::path::PathBuf,
+        cx: &mut gpui::Context<V>,
+    ) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.ensure_active_session_terminal_in(dir, cx);
+        }
+    }
+
+    pub fn ensure_active_session_terminal_count<V: 'static>(
+        &mut self,
+        count: usize,
+        cx: &mut gpui::Context<V>,
+    ) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager
+                .ensure_active_session_terminal_count(count, cx);
+        }
+    }
+
+    pub fn clear_session_terminals(&mut self, index: usize) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.clear_session_terminals(index);
+        }
+    }
+
+    pub fn get_session_active_terminal(
+        &self,
+        index: usize,
+    ) -> Option<gpui::Entity<crate::terminal::TerminalView>> {
+        self.active_group()?
+            .session_manager
+            .get_session_active_terminal(index)
+    }
+
+    pub fn apply_terminal_default_directory_to_all(&mut self, relative_path: Option<&str>) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager
+                .apply_terminal_default_directory_to_all(relative_path);
+        }
     }
 }
 
@@ -887,6 +1200,17 @@ mod tests {
     }
 
     #[test]
+    fn test_session_manager_set_layout_mode() {
+        let mut manager = SessionManager::new();
+
+        manager.set_layout_mode(LayoutMode::Parallel);
+        assert_eq!(manager.layout_mode(), LayoutMode::Parallel);
+
+        manager.set_layout_mode(LayoutMode::Single);
+        assert_eq!(manager.layout_mode(), LayoutMode::Single);
+    }
+
+    #[test]
     fn test_session_manager_toggle_parallel_visibility() {
         let mut manager = SessionManager::new();
         manager.init_from_worktrees(vec![make_worktree("s0", false), make_worktree("s1", false)]);
@@ -898,6 +1222,26 @@ mod tests {
 
         manager.toggle_parallel_visibility(0);
         assert!(!manager.sessions()[0].is_visible_in_parallel());
+    }
+
+    #[test]
+    fn test_session_manager_set_parallel_visibility_by_paths() {
+        use std::collections::HashSet;
+
+        let mut manager = SessionManager::new();
+        manager.init_from_worktrees(vec![
+            make_worktree("s0", false),
+            make_worktree("s1", false),
+            make_worktree("s2", false),
+        ]);
+        manager.switch_to(1);
+
+        let visible = HashSet::from([PathBuf::from("/worktrees/s2")]);
+        manager.set_parallel_visibility_by_paths(&visible);
+
+        assert!(!manager.sessions()[0].is_visible_in_parallel());
+        assert!(manager.sessions()[1].is_visible_in_parallel());
+        assert!(manager.sessions()[2].is_visible_in_parallel());
     }
 
     #[test]

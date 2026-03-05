@@ -3,8 +3,8 @@
 use super::SashikiApp;
 use crate::dialog::ActiveDialog;
 use crate::git::{GitRepo, validate_branch_name};
-use crate::ui::StageSelectionEvent;
 use crate::template::{self, TemplateConfig};
+use crate::ui::StageSelectionEvent;
 use gpui::{Context, Focusable, PathPromptOptions, Window};
 use std::path::{Path, PathBuf};
 
@@ -349,7 +349,7 @@ impl SashikiApp {
             return;
         }
 
-        let repo = match self.git_repo.as_ref() {
+        let repo = match self.session_manager.active_git_repo().cloned() {
             Some(r) => r,
             None => {
                 self.active_dialog = ActiveDialog::Error {
@@ -383,7 +383,7 @@ impl SashikiApp {
         }
 
         // Load template config
-        let template = TemplateConfig::load(repo);
+        let template = TemplateConfig::load(&repo);
         let steps = template.creation_steps();
 
         // Switch to Creating dialog with progress
@@ -570,7 +570,8 @@ impl SashikiApp {
             }
 
             // Report fallback usage for visibility
-            let fallback_results: Vec<_> = sync_results.iter().filter(|r| r.copied_instead).collect();
+            let fallback_results: Vec<_> =
+                sync_results.iter().filter(|r| r.copied_instead).collect();
             if !fallback_results.is_empty() {
                 let msg = fallback_results
                     .iter()
@@ -808,7 +809,11 @@ impl SashikiApp {
 
     // === Discard Hunk Confirm ===
 
-    pub fn open_discard_hunk_confirm(&mut self, event: StageSelectionEvent, cx: &mut Context<Self>) {
+    pub fn open_discard_hunk_confirm(
+        &mut self,
+        event: StageSelectionEvent,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_discard_hunk = Some(event);
         self.active_dialog = ActiveDialog::DiscardHunkConfirm;
         cx.notify();
@@ -967,7 +972,7 @@ impl SashikiApp {
         self.prepare_session_for_deletion(index, cx);
         self.cleanup_resources_for_deletion(index, cx);
 
-        if let Some(ref repo) = self.git_repo {
+        if let Some(repo) = self.session_manager.active_git_repo().cloned() {
             // Non-fatal: git worktree prune will clean up orphaned entries.
             if let Err(e) = repo.remove_worktree(&worktree_name) {
                 eprintln!("Warning: git worktree remove failed: {}", e);
@@ -1081,12 +1086,19 @@ impl SashikiApp {
 
     // === Template settings ===
 
-    pub fn open_template_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_template_settings(
+        &mut self,
+        group_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let template = self
-            .git_repo
-            .as_ref()
-            .map(TemplateConfig::load)
+            .session_manager
+            .groups()
+            .get(group_index)
+            .map(|g| TemplateConfig::load(&g.git_repo))
             .unwrap_or_default();
+        self.settings_group_index = group_index;
         self.settings_inputs = [
             template.pre_create_commands.join("\n"),
             template.file_copies.join("\n"),
@@ -1147,8 +1159,8 @@ impl SashikiApp {
                 Some(workdir)
             };
 
-            if let Some(ref repo) = self.git_repo {
-                if let Err(e) = template.save(repo) {
+            if let Some(group) = self.session_manager.groups().get(self.settings_group_index) {
+                if let Err(e) = template.save(&group.git_repo) {
                     self.active_dialog = ActiveDialog::Error {
                         message: format!("Failed to save settings: {}", e),
                     };
@@ -1171,6 +1183,27 @@ impl SashikiApp {
             window.focus(&focus, cx);
         }
         cx.notify();
+    }
+
+    // === Close group confirm ===
+
+    pub fn open_close_group_dialog(&mut self, group_index: usize, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::CloseGroupConfirm { group_index };
+        cx.notify();
+    }
+
+    pub fn close_close_group_dialog(&mut self, cx: &mut Context<Self>) {
+        self.active_dialog = ActiveDialog::None;
+        cx.notify();
+    }
+
+    pub fn confirm_close_group(&mut self, cx: &mut Context<Self>) {
+        let ActiveDialog::CloseGroupConfirm { group_index } = self.active_dialog else {
+            self.close_close_group_dialog(cx);
+            return;
+        };
+        self.active_dialog = ActiveDialog::None;
+        self.close_group(group_index, cx);
     }
 
     // === Open folder ===

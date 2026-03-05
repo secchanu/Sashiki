@@ -313,10 +313,7 @@ fn sync_single_file(source_root: &Path, dest_root: &Path, src_path: &Path) -> Fi
                 path: rel_str,
                 success: true,
                 copied_instead: true,
-                error: Some(format!(
-                    "Hard-link failed ({}), copied instead",
-                    link_err
-                )),
+                error: Some(format!("Hard-link failed ({}), copied instead", link_err)),
             },
             Err(copy_err) => FileSyncResult {
                 path: rel_str,

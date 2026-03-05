@@ -709,7 +709,8 @@ impl FileView {
 
         for line in diff.lines() {
             if line.starts_with("@@")
-                && let Some((_, _, new_start, new_count)) = Self::parse_hunk_header_with_counts(line)
+                && let Some((_, _, new_start, new_count)) =
+                    Self::parse_hunk_header_with_counts(line)
             {
                 let new_end = if new_count == 0 {
                     new_start
@@ -1009,10 +1010,7 @@ impl FileView {
                     InlineChangeType::Unchanged => (None, rgb(TEXT), 1.0),
                 };
 
-                let line_num_str = line
-                    .line_num
-                    .map(|n| n.to_string())
-                    .unwrap_or_default();
+                let line_num_str = line.line_num.map(|n| n.to_string()).unwrap_or_default();
 
                 let prefix = match line.change_type {
                     InlineChangeType::Added => "+",
@@ -1032,14 +1030,14 @@ impl FileView {
                 let stage_line = line_num_for_click.unwrap_or(1);
                 // Untracked (Added) files use a synthetic diff; git diff is empty so hunk
                 // staging would silently fail — hide the hunk buttons for those files.
-                let is_untracked =
-                    matches!(self.current_change_type, Some(ChangeType::Added))
-                        && is_unstaged_section;
+                let is_untracked = matches!(self.current_change_type, Some(ChangeType::Added))
+                    && is_unstaged_section;
                 let can_show_stage =
                     is_hovered_hunk && line_num_for_click.is_some() && !is_untracked;
-                let can_show_discard =
-                    is_hovered_hunk && is_unstaged_section && line_num_for_click.is_some()
-                        && !is_untracked;
+                let can_show_discard = is_hovered_hunk
+                    && is_unstaged_section
+                    && line_num_for_click.is_some()
+                    && !is_untracked;
                 let stage_symbol = if is_staged_section { "-" } else { "+" };
                 let gutter_strip_color = match line.change_type {
                     InlineChangeType::Added => rgb(GREEN),

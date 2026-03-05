@@ -31,12 +31,22 @@ pub enum ActiveDialog {
     /// Confirm before discarding an unstaged hunk/line range (pending data in app state).
     DiscardHunkConfirm,
     /// Confirm before applying a stash entry.
-    StashApplyConfirm { reference: String },
+    StashApplyConfirm {
+        reference: String,
+    },
     /// Confirm before popping a stash entry (apply + drop).
-    StashPopConfirm { reference: String },
+    StashPopConfirm {
+        reference: String,
+    },
     /// Confirm before dropping a stash entry.
-    StashDropConfirm { reference: String },
+    StashDropConfirm {
+        reference: String,
+    },
     Deleting,
+    /// Confirm before closing a session group
+    CloseGroupConfirm {
+        group_index: usize,
+    },
     /// Template settings dialog
     TemplateSettings,
     Error {

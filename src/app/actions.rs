@@ -19,6 +19,7 @@ actions!(
         CloseFileView,
         OpenFolder,
         Quit,
+        CloseActiveGroup,
     ]
 );
 
@@ -164,12 +165,22 @@ impl SashikiApp {
     }
 
     pub fn refresh_worktrees(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref repo) = self.git_repo
+        if let Some(repo) = self.session_manager.active_git_repo().cloned()
             && let Ok(worktrees) = repo.list_worktrees()
         {
             self.session_manager.sync_with_worktrees(worktrees);
             self.apply_template_working_directory_defaults();
         }
         cx.notify();
+    }
+
+    pub fn on_close_active_group(
+        &mut self,
+        _: &CloseActiveGroup,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let index = self.session_manager.active_group_index();
+        self.open_close_group_dialog(index, cx);
     }
 }

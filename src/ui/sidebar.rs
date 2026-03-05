@@ -1,15 +1,15 @@
 //! Sidebar rendering for session list
 
 use crate::app::SashikiApp;
-use crate::session::{LayoutMode, SessionStatus};
+use crate::session::{LayoutMode, SessionGroup, SessionStatus};
 use crate::theme::*;
 use crate::ui::{render_locked_badge, render_main_badge};
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, px, rgb};
 
 impl SashikiApp {
     pub fn render_sidebar(&self, cx: &Context<Self>) -> AnyElement {
-        let sessions = self.session_manager.sessions();
-        let active_index = self.session_manager.active_index();
+        let groups = self.session_manager.groups();
+        let active_group_index = self.session_manager.active_group_index();
         let layout_mode = self.session_manager.layout_mode();
 
         div()
@@ -19,19 +19,11 @@ impl SashikiApp {
             .flex()
             .flex_col()
             .child(self.render_sidebar_header(layout_mode, cx))
-            .child(self.render_session_list(sessions, active_index, layout_mode, cx))
-            .when(sessions.is_empty(), |this: gpui::Div| {
-                this.child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(rgb(TEXT_MUTED))
-                        .text_sm()
-                        .child("No worktrees"),
-                )
-            })
+            .child(div().flex_1().overflow_hidden().flex().flex_col().children(
+                groups.iter().enumerate().map(|(gi, group)| {
+                    self.render_group_section(gi, group, active_group_index, layout_mode, cx)
+                }),
+            ))
             .child(self.render_create_button(cx))
             .into_any_element()
     }
@@ -77,26 +69,161 @@ impl SashikiApp {
             ))
     }
 
-    fn render_session_list(
+    fn render_group_section(
         &self,
-        sessions: &[crate::session::Session],
-        active_index: usize,
+        group_index: usize,
+        group: &SessionGroup,
+        active_group_index: usize,
         layout_mode: LayoutMode,
         cx: &Context<Self>,
     ) -> impl IntoElement {
+        let is_active_group = group_index == active_group_index;
+        let is_expanded = group.is_expanded();
+        let group_name = group.name().to_string();
+
+        let sessions = if is_active_group {
+            self.session_manager.sessions()
+        } else {
+            group.session_manager.sessions()
+        };
+        let active_session_index = if is_active_group {
+            self.session_manager.active_index()
+        } else {
+            group.session_manager.active_index()
+        };
+
+        let header = {
+            let group_name_clone = group_name.clone();
+            div()
+                .id(format!("group-header-{}", group_index))
+                .h_7()
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_1()
+                .when(is_active_group, |el| el.bg(rgb(BG_SURFACE0)))
+                .hover(|el| el.bg(rgb(BG_SURFACE1)))
+                .child(
+                    // 展開/折りたたみ矢印（グループ切り替えは発生しない独立クリック領域）
+                    div()
+                        .id(format!("group-expand-{}", group_index))
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, _, cx| {
+                            this.session_manager.toggle_group_expanded(group_index);
+                            cx.notify();
+                        }))
+                        .child(if is_expanded { "▼" } else { "▶" }),
+                )
+                .child(
+                    // グループ名（クリックでグループ切り替え）
+                    div()
+                        .id(format!("group-name-{}", group_index))
+                        .flex_1()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(if is_active_group {
+                            rgb(TEXT)
+                        } else {
+                            rgb(TEXT_MUTED)
+                        })
+                        .truncate()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.session_manager.switch_group(group_index);
+                            this.activate_and_focus_session(window, cx);
+                        }))
+                        .child(group_name_clone),
+                )
+                // テンプレート設定アイコン
+                .child(
+                    div()
+                        .id(format!("group-template-{}", group_index))
+                        .px_1()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .hover(|el| el.text_color(rgb(TEXT)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_template_settings(group_index, window, cx);
+                        }))
+                        .child("⚙"),
+                )
+                .child(
+                    div()
+                        .id(format!("group-close-{}", group_index))
+                        .px_1()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .hover(|el| el.text_color(rgb(RED)))
+                        .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, _, cx| {
+                            this.open_close_group_dialog(group_index, cx);
+                        }))
+                        .child("×"),
+                )
+        };
+
         div()
-            .flex_1()
-            .overflow_hidden()
-            .children(sessions.iter().enumerate().map(|(i, session)| {
-                self.render_session_item(i, session, active_index, layout_mode, cx)
-            }))
+            .flex()
+            .flex_col()
+            .border_b_1()
+            .border_color(rgb(BG_SURFACE0))
+            .child(header)
+            .when(is_expanded, |el| {
+                el.children(sessions.iter().enumerate().map(|(si, session)| {
+                    self.render_session_item(
+                        group_index,
+                        si,
+                        session,
+                        is_active_group,
+                        active_session_index,
+                        layout_mode,
+                        cx,
+                    )
+                }))
+                .when(sessions.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .px_4()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child("No sessions"),
+                    )
+                })
+                .child(
+                    div().px_2().py_1().child(
+                        div()
+                            .id(format!("group-create-worktree-{}", group_index))
+                            .w_full()
+                            .px_3()
+                            .py_1()
+                            .cursor_pointer()
+                            .rounded_sm()
+                            .bg(rgb(BG_SURFACE0))
+                            .hover(|el| el.bg(rgb(BG_SURFACE1)))
+                            .text_center()
+                            .text_xs()
+                            .text_color(rgb(GREEN))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.session_manager.switch_group(group_index);
+                                this.open_create_dialog(window, cx);
+                            }))
+                            .child("+ New Worktree"),
+                    ),
+                )
+            })
     }
 
     fn render_session_item(
         &self,
-        i: usize,
+        group_index: usize,
+        session_index: usize,
         session: &crate::session::Session,
-        active_index: usize,
+        is_active_group: bool,
+        active_session_index: usize,
         layout_mode: LayoutMode,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -108,74 +235,92 @@ impl SashikiApp {
         let status = session.status();
         let visible_in_parallel = session.is_visible_in_parallel();
 
-        let is_selected = match layout_mode {
-            LayoutMode::Single => i == active_index,
-            LayoutMode::Parallel => visible_in_parallel,
+        let is_selected = if !is_active_group {
+            false
+        } else {
+            match layout_mode {
+                LayoutMode::Single => session_index == active_session_index,
+                LayoutMode::Parallel => visible_in_parallel,
+            }
         };
 
         div()
-            .id(format!("session-{}", i))
-            .px_3()
+            .id(format!("session-{}-{}", group_index, session_index))
+            .pl(px(20.0))
+            .pr_3()
             .py_2()
             .cursor_pointer()
             .when(is_selected, |el| el.bg(rgb(BG_SURFACE0)))
             .hover(|el| el.bg(rgb(BG_SURFACE1)))
             .on_click(cx.listener(move |this, _, window, cx| {
+                // 別グループのセッションをクリックしたらグループを切り替えてからセッションを選択
+                if !is_active_group {
+                    this.session_manager.switch_group(group_index);
+                }
                 match this.session_manager.layout_mode() {
                     LayoutMode::Single => {
-                        this.on_session_selected(i, window, cx);
+                        this.on_session_selected(session_index, window, cx);
                     }
                     LayoutMode::Parallel => {
-                        this.on_toggle_parallel_visibility(i, cx);
+                        this.on_toggle_parallel_visibility(session_index, cx);
                     }
                 }
             }))
             .flex()
             .items_center()
             .gap_2()
-            .when(layout_mode == LayoutMode::Parallel, |el| {
-                el.child(
-                    div()
-                        .w_4()
-                        .text_center()
-                        .text_xs()
-                        .text_color(if visible_in_parallel {
-                            rgb(BLUE)
-                        } else {
-                            rgb(TEXT_MUTED)
-                        })
-                        .child(if visible_in_parallel { "☑" } else { "☐" }),
-                )
-            })
-            .when(layout_mode == LayoutMode::Single, |el| {
-                el.child(
-                    div()
-                        .text_color(match status {
-                            SessionStatus::Focused => rgb(GREEN),
-                            SessionStatus::Running => rgb(YELLOW),
-                            SessionStatus::Stopped => rgb(TEXT_MUTED),
-                        })
-                        .text_sm()
-                        .child(status.symbol()),
-                )
-            })
+            .when(
+                layout_mode == LayoutMode::Parallel && is_active_group,
+                |el| {
+                    el.child(
+                        div()
+                            .w_4()
+                            .text_center()
+                            .text_xs()
+                            .text_color(if visible_in_parallel {
+                                rgb(BLUE)
+                            } else {
+                                rgb(TEXT_MUTED)
+                            })
+                            .child(if visible_in_parallel { "☑" } else { "☐" }),
+                    )
+                },
+            )
+            .when(
+                layout_mode == LayoutMode::Single || !is_active_group,
+                |el| {
+                    el.child(
+                        div()
+                            .text_color(match status {
+                                SessionStatus::Focused => rgb(GREEN),
+                                SessionStatus::Running => rgb(YELLOW),
+                                SessionStatus::Stopped => rgb(TEXT_MUTED),
+                            })
+                            .text_sm()
+                            .child(status.symbol()),
+                    )
+                },
+            )
             .child(div().w_2().h_2().rounded_full().bg(rgb(color)))
             .child(self.render_session_name_section(name, branch, is_main, is_locked))
-            .when(layout_mode == LayoutMode::Single && !is_main, |el| {
-                el.child(
-                    div()
-                        .id(format!("delete-{}", i))
-                        .px_1()
-                        .cursor_pointer()
-                        .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
-                        .hover(|el| el.text_color(rgb(RED)))
-                        .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, _, cx| {
-                            this.open_delete_dialog(i, cx);
-                        }))
-                        .child("×"),
-                )
-            })
+            .when(
+                layout_mode == LayoutMode::Single && is_active_group && !is_main,
+                |el| {
+                    el.child(
+                        div()
+                            .id(format!("delete-{}-{}", group_index, session_index))
+                            .px_1()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .hover(|el| el.text_color(rgb(RED)))
+                            .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, _, cx| {
+                                this.open_delete_dialog(session_index, cx);
+                            }))
+                            .child("×"),
+                    )
+                },
+            )
     }
 
     fn render_session_name_section(
@@ -217,30 +362,9 @@ impl SashikiApp {
             .border_color(rgb(BG_SURFACE0))
             .px_3()
             .py_2()
-            .flex()
-            .flex_col()
-            .gap_1()
             .child(
                 div()
-                    .id("create-worktree-btn")
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .cursor_pointer()
-                    .rounded_sm()
-                    .bg(rgb(BG_SURFACE0))
-                    .hover(|el| el.bg(rgb(BG_SURFACE1)))
-                    .text_center()
-                    .text_xs()
-                    .text_color(rgb(GREEN))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_create_dialog(window, cx);
-                    }))
-                    .child("+ Create Worktree"),
-            )
-            .child(
-                div()
-                    .id("template-settings-btn")
+                    .id("open-project-btn")
                     .w_full()
                     .px_3()
                     .py_1()
@@ -251,9 +375,9 @@ impl SashikiApp {
                     .text_xs()
                     .text_color(rgb(TEXT_MUTED))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_template_settings(window, cx);
+                        this.on_open_folder(&crate::app::OpenFolder, window, cx);
                     }))
-                    .child("Template Settings"),
+                    .child("+ Open Project"),
             )
     }
 }

@@ -1290,6 +1290,119 @@ impl SashikiApp {
             .into_any_element()
     }
 
+    pub fn render_close_group_dialog(&self, group_index: usize, cx: &Context<Self>) -> AnyElement {
+        let group_name = self
+            .session_manager
+            .groups()
+            .get(group_index)
+            .map(|g| g.name().to_string())
+            .unwrap_or_default();
+
+        div()
+            .id("close-group-container")
+            .absolute()
+            .inset_0()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                let key = &event.keystroke.key;
+                if key == "escape" {
+                    this.close_close_group_dialog(cx);
+                } else if key == "enter" {
+                    this.confirm_close_group(cx);
+                }
+            }))
+            .child(
+                div()
+                    .id("close-group-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(rgba(OVERLAY))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.close_close_group_dialog(cx);
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("close-group-dialog")
+                            .occlude()
+                            .w_96()
+                            .bg(rgb(BG_BASE))
+                            .border_1()
+                            .border_color(rgb(RED))
+                            .rounded_md()
+                            .shadow_lg()
+                            .child(
+                                div()
+                                    .px_4()
+                                    .py_3()
+                                    .border_b_1()
+                                    .border_color(rgb(BG_SURFACE0))
+                                    .text_color(rgb(RED))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("Close Group"),
+                            )
+                            .child(div().p_4().flex().flex_col().gap_3().child(
+                                div().text_color(rgb(TEXT)).text_sm().child(format!(
+                                    "Close \"{}\"? All sessions will be closed.",
+                                    group_name
+                                )),
+                            ))
+                            .child(
+                                div()
+                                    .px_4()
+                                    .py_3()
+                                    .border_t_1()
+                                    .border_color(rgb(BG_SURFACE0))
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("cancel-close-group")
+                                            .px_4()
+                                            .py_2()
+                                            .cursor_pointer()
+                                            .rounded_sm()
+                                            .bg(rgb(BG_SURFACE1))
+                                            .hover(|el| el.bg(rgb(BG_SURFACE2)))
+                                            .text_xs()
+                                            .text_color(rgb(TEXT))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.close_close_group_dialog(cx);
+                                            }))
+                                            .child("Cancel"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("confirm-close-group")
+                                            .px_4()
+                                            .py_2()
+                                            .cursor_pointer()
+                                            .rounded_sm()
+                                            .bg(rgb(RED))
+                                            .hover(|el| el.bg(rgb(MAROON)))
+                                            .text_xs()
+                                            .text_color(rgb(BG_BASE))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.confirm_close_group(cx);
+                                            }))
+                                            .child("Close"),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     pub fn render_discard_confirm_dialog(
         &self,
         path: &std::path::Path,
@@ -1301,9 +1414,16 @@ impl SashikiApp {
             .and_then(|n| n.to_str())
             .unwrap_or_else(|| path.to_str().unwrap_or(""));
         let is_untracked = change_type == crate::git::ChangeType::Added;
-        let title = if is_untracked { "Delete File" } else { "Discard Changes" };
+        let title = if is_untracked {
+            "Delete File"
+        } else {
+            "Discard Changes"
+        };
         let message = if is_untracked {
-            format!("Delete \"{}\"?\nThis will permanently remove the file from disk.", file_name)
+            format!(
+                "Delete \"{}\"?\nThis will permanently remove the file from disk.",
+                file_name
+            )
         } else {
             format!(
                 "Discard changes to \"{}\"?\nThis will revert the file to its last committed state.",
@@ -1363,26 +1483,21 @@ impl SashikiApp {
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .child(title),
                             )
-                            .child(
-                                div()
-                                    .p_4()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_3()
-                                    .children(message.lines().map(|line| {
-                                        if line.starts_with("This will") {
-                                            div()
-                                                .text_color(rgb(YELLOW))
-                                                .text_xs()
-                                                .child(line.to_string())
-                                        } else {
-                                            div()
-                                                .text_color(rgb(TEXT))
-                                                .text_sm()
-                                                .child(line.to_string())
-                                        }
-                                    })),
-                            )
+                            .child(div().p_4().flex().flex_col().gap_3().children(
+                                message.lines().map(|line| {
+                                    if line.starts_with("This will") {
+                                        div()
+                                            .text_color(rgb(YELLOW))
+                                            .text_xs()
+                                            .child(line.to_string())
+                                    } else {
+                                        div()
+                                            .text_color(rgb(TEXT))
+                                            .text_sm()
+                                            .child(line.to_string())
+                                    }
+                                }),
+                            ))
                             .child(
                                 div()
                                     .px_4()
@@ -1616,10 +1731,9 @@ impl SashikiApp {
                                             .child("There are no staged changes to commit."),
                                     )
                                     .child(
-                                        div()
-                                            .text_color(rgb(TEXT_SECONDARY))
-                                            .text_xs()
-                                            .child("Would you like to stage all changes and commit?"),
+                                        div().text_color(rgb(TEXT_SECONDARY)).text_xs().child(
+                                            "Would you like to stage all changes and commit?",
+                                        ),
                                     ),
                             )
                             .child(
@@ -1999,6 +2113,12 @@ impl SashikiApp {
         let inputs: Vec<String> = self.settings_inputs.iter().cloned().collect();
         let cursors = self.settings_cursors;
         let selection_anchors = self.settings_selection_anchors;
+        let group_name = self
+            .session_manager
+            .groups()
+            .get(self.settings_group_index)
+            .map(|g| g.name().to_string())
+            .unwrap_or_default();
 
         div()
             .id("template-settings-container")
@@ -2224,7 +2344,7 @@ impl SashikiApp {
                                     .border_color(rgb(BG_SURFACE0))
                                     .text_color(rgb(BLUE))
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .child("Session Template"),
+                                    .child(format!("Session Template — {}", group_name)),
                             )
                             // Body
                             .child(
@@ -2520,9 +2640,12 @@ impl SashikiApp {
                     .absolute()
                     .inset_0()
                     .bg(rgba(OVERLAY))
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, window, cx| {
-                        this.cancel_amend_commit(window, cx);
-                    })),
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.cancel_amend_commit(window, cx);
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -2563,12 +2686,9 @@ impl SashikiApp {
                                             .text_sm()
                                             .child("Replace the last commit with updated content?"),
                                     )
-                                    .child(
-                                        div()
-                                            .text_color(rgb(TEXT_SECONDARY))
-                                            .text_xs()
-                                            .child("If already pushed, a force push will be required."),
-                                    ),
+                                    .child(div().text_color(rgb(TEXT_SECONDARY)).text_xs().child(
+                                        "If already pushed, a force push will be required.",
+                                    )),
                             )
                             .child(
                                 div()
@@ -2636,9 +2756,12 @@ impl SashikiApp {
                     .absolute()
                     .inset_0()
                     .bg(rgba(OVERLAY))
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.cancel_discard_hunk(cx);
-                    })),
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.cancel_discard_hunk(cx);
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -2668,14 +2791,11 @@ impl SashikiApp {
                                     .child("Discard Changes"),
                             )
                             .child(
-                                div()
-                                    .p_4()
-                                    .child(
-                                        div()
-                                            .text_color(rgb(TEXT))
-                                            .text_sm()
-                                            .child("Discard this hunk? The changes cannot be recovered."),
+                                div().p_4().child(
+                                    div().text_color(rgb(TEXT)).text_sm().child(
+                                        "Discard this hunk? The changes cannot be recovered.",
                                     ),
+                                ),
                             )
                             .child(
                                 div()
@@ -2724,7 +2844,11 @@ impl SashikiApp {
             .into_any_element()
     }
 
-    pub fn render_stash_apply_confirm_dialog(&self, reference: &str, cx: &Context<Self>) -> AnyElement {
+    pub fn render_stash_apply_confirm_dialog(
+        &self,
+        reference: &str,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let body = format!("Apply {}?", reference);
         div()
             .id("stash-apply-confirm-container")
@@ -2836,7 +2960,11 @@ impl SashikiApp {
             .into_any_element()
     }
 
-    pub fn render_stash_pop_confirm_dialog(&self, reference: &str, cx: &Context<Self>) -> AnyElement {
+    pub fn render_stash_pop_confirm_dialog(
+        &self,
+        reference: &str,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let body = format!("Pop {}?", reference);
         div()
             .id("stash-pop-confirm-container")
@@ -2948,7 +3076,11 @@ impl SashikiApp {
             .into_any_element()
     }
 
-    pub fn render_stash_drop_confirm_dialog(&self, reference: &str, cx: &Context<Self>) -> AnyElement {
+    pub fn render_stash_drop_confirm_dialog(
+        &self,
+        reference: &str,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let body = format!("Delete {}? This cannot be undone.", reference);
         div()
             .id("stash-drop-confirm-container")
@@ -2968,9 +3100,12 @@ impl SashikiApp {
                     .absolute()
                     .inset_0()
                     .bg(rgba(OVERLAY))
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.cancel_stash_drop(cx);
-                    })),
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.cancel_stash_drop(cx);
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -3066,10 +3201,13 @@ impl SashikiApp {
                     .id("commit-dropdown-backdrop")
                     .absolute()
                     .inset_0()
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.commit_dropdown_open = false;
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.commit_dropdown_open = false;
+                            cx.notify();
+                        }),
+                    ),
             )
             // ドロップダウン本体 (ヘッダーの真下・右端に配置)
             .child(

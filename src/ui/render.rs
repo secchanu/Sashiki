@@ -37,6 +37,7 @@ impl Render for SashikiApp {
             .on_action(cx.listener(Self::on_toggle_verify_terminal))
             .on_action(cx.listener(Self::on_open_commit_dialog))
             .on_action(cx.listener(Self::on_open_stash_dialog))
+            .on_action(cx.listener(Self::on_close_active_group))
             .child(self.render_header(layout_mode, session_count, running_session_count, cx))
             .child(self.render_main_content(layout_mode, cx))
             .when(self.open_menu.is_some(), |this| {
@@ -134,6 +135,13 @@ impl Render for SashikiApp {
             .when(
                 matches!(self.active_dialog, ActiveDialog::TemplateSettings),
                 |this| this.child(self.render_template_settings_dialog(cx)),
+            )
+            .when_some(
+                match &self.active_dialog {
+                    ActiveDialog::CloseGroupConfirm { group_index } => Some(*group_index),
+                    _ => None,
+                },
+                |this, idx| this.child(self.render_close_group_dialog(idx, cx)),
             )
             .when_some(
                 match &self.active_dialog {
@@ -275,7 +283,8 @@ impl SashikiApp {
                         cx,
                         |this, window, cx| {
                             this.open_menu = None;
-                            this.open_template_settings(window, cx);
+                            let gi = this.session_manager.active_group_index();
+                            this.open_template_settings(gi, window, cx);
                         },
                     ))
                     .child(Self::render_menu_separator())

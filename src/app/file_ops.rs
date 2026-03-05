@@ -4,8 +4,7 @@ use super::SashikiApp;
 use crate::git::{ChangeType, GitRepo};
 use crate::lsp::{LspRequestError, WorkspaceId};
 use crate::ui::{
-    ChangeSection, GotoDefinitionEvent, SelectionAction, StageSelectionEvent,
-    StageSelectionKind,
+    ChangeSection, GotoDefinitionEvent, SelectionAction, StageSelectionEvent, StageSelectionKind,
 };
 use gpui::Context;
 use std::io::Read;
@@ -66,7 +65,7 @@ impl SashikiApp {
             return;
         }
 
-        if let Some(ref repo) = self.git_repo
+        if let Some(repo) = self.session_manager.active_git_repo()
             && let Ok(files) = repo.get_changed_files()
         {
             self.changed_files = files;

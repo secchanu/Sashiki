@@ -41,6 +41,7 @@ pub const CONFIG_POST_CREATE_CMD: &str = "sashiki.template.postCreateCommand";
 pub const CONFIG_WORKING_DIR: &str = "sashiki.template.workingDirectory";
 
 /// Git repository wrapper using CLI commands
+#[derive(Clone)]
 pub struct GitRepo {
     /// Working directory of the main worktree
     workdir: PathBuf,
@@ -702,8 +703,7 @@ impl GitRepo {
         match run_git(&self.workdir, &["restore", "--staged", "."]) {
             Ok(_) => Ok(()),
             Err(primary_err) => {
-                let fallback =
-                    run_git(&self.workdir, &["rm", "--cached", "-r", "--quiet", "."]);
+                let fallback = run_git(&self.workdir, &["rm", "--cached", "-r", "--quiet", "."]);
                 match fallback {
                     Ok(_) => Ok(()),
                     Err(_) => Err(primary_err),
@@ -759,8 +759,10 @@ impl GitRepo {
     /// List files changed in a stash entry (`git stash show --name-status <ref>`).
     /// Returns `(status, path)` pairs, e.g. `("M", "src/app.rs")`.
     pub fn stash_show_files(&self, reference: &str) -> Result<Vec<(String, String)>> {
-        let output =
-            run_git(&self.workdir, &["stash", "show", "--name-status", reference])?;
+        let output = run_git(
+            &self.workdir,
+            &["stash", "show", "--name-status", reference],
+        )?;
         Ok(output
             .lines()
             .filter(|l| !l.is_empty())
@@ -797,9 +799,7 @@ impl GitRepo {
     /// Otherwise keeps the existing message unchanged.
     pub fn amend_commit(&self, message: Option<&str>) -> Result<()> {
         match message {
-            Some(msg) => {
-                run_git_with_input(&self.workdir, &["commit", "--amend", "-F", "-"], msg)?
-            }
+            Some(msg) => run_git_with_input(&self.workdir, &["commit", "--amend", "-F", "-"], msg)?,
             None => run_git(&self.workdir, &["commit", "--amend", "--no-edit"])?,
         };
         Ok(())
