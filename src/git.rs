@@ -356,7 +356,7 @@ impl GitRepo {
 
     /// Get list of changed files using `git status --porcelain=v1`
     pub fn get_changed_files(&self) -> Result<Vec<ChangedFile>> {
-        let output = run_git(&self.workdir, &["status", "--porcelain=v1"])?;
+        let output = run_git(&self.workdir, &["status", "--porcelain=v1", "-u"])?;
         let mut files = Vec::new();
 
         for line in output.lines() {
@@ -369,11 +369,10 @@ impl GitRepo {
             let path_str = &line[3..];
 
             // Handle renamed files: "old -> new"
-            // Strip trailing '/' that git appends to untracked directories.
             let path = if let Some(arrow_pos) = path_str.find(" -> ") {
-                PathBuf::from(path_str[arrow_pos + 4..].trim_end_matches('/'))
+                PathBuf::from(&path_str[arrow_pos + 4..])
             } else {
-                PathBuf::from(path_str.trim_end_matches('/'))
+                PathBuf::from(path_str)
             };
 
             let staged_change = Self::index_status_to_change(index_status);
@@ -684,10 +683,16 @@ impl GitRepo {
         Ok(())
     }
 
-    /// Delete an untracked file from the working tree (`git clean -f -- <path>`).
+    /// Delete an untracked file or directory from the working tree.
+    /// Files: `git clean -f -- <path>`, directories: `git clean -rf -- <path>`.
     pub fn clean_file(&self, file_path: &Path) -> Result<()> {
         let rel = self.relative_path_string(file_path);
-        run_git(&self.workdir, &["clean", "-f", "--", &rel])?;
+        let args = if file_path.is_dir() {
+            vec!["clean", "-f", "-d", "--", &rel]
+        } else {
+            vec!["clean", "-f", "--", &rel]
+        };
+        run_git(&self.workdir, &args)?;
         Ok(())
     }
 

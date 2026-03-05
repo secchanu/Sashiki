@@ -716,6 +716,39 @@ impl SashikiApp {
             };
             let dir_row = dir_row.child(stage_btn);
 
+            // 未ステージのディレクトリにも Discard (×) ボタンを表示
+            let discard_path = node_path.clone();
+            let dir_row = if !is_staged {
+                let discard_btn: AnyElement = if is_hovered {
+                    div()
+                        .id(format!(
+                            "tree-dir-discard-{}-{}",
+                            section_id,
+                            discard_path.to_string_lossy()
+                        ))
+                        .w_4()
+                        .text_center()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(rgb(RED))
+                        .hover(|b| b.rounded_sm().bg(rgb(BG_SURFACE1)).text_color(rgb(RED)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_discard_confirm(
+                                discard_path.clone(),
+                                crate::git::ChangeType::Added,
+                                cx,
+                            );
+                        }))
+                        .child("×")
+                        .into_any_element()
+                } else {
+                    div().w_4().into_any_element()
+                };
+                dir_row.child(discard_btn)
+            } else {
+                dir_row
+            };
+
             result = result.child(dir_row);
 
             if is_expanded {
