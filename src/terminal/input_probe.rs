@@ -94,10 +94,10 @@ mod imp {
         DispatchMessageW, ES_AUTOHSCROLL, ES_LEFT, EVENT_OBJECT_FOCUS, EVENT_OBJECT_LOCATIONCHANGE,
         EVENT_OBJECT_TEXTSELECTIONCHANGED, EVENT_OBJECT_VALUECHANGE, GWLP_WNDPROC,
         GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT,
-        KillTimer, LLKHF_INJECTED, MSG, OBJID_CARET, OBJID_CLIENT, PostMessageW, SendMessageW,
-        SetTimer, SetWindowLongPtrW, SetWindowTextW, SetWindowsHookExW, TranslateMessage,
+        LLKHF_INJECTED, MSG, OBJID_CARET, OBJID_CLIENT, PostMessageW, SendMessageW,
+        SetWindowLongPtrW, SetWindowTextW, SetWindowsHookExW, TranslateMessage,
         UnhookWindowsHookEx, WH_CALLWNDPROC, WH_KEYBOARD_LL, WM_COMMAND, WM_GETOBJECT, WM_KEYDOWN,
-        WM_KEYUP, WM_NCDESTROY, WM_PASTE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDPROC, WS_CHILD,
+        WM_KEYUP, WM_NCDESTROY, WM_PASTE, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDPROC, WS_CHILD,
         WS_VISIBLE,
     };
 
@@ -133,9 +133,6 @@ mod imp {
         old_wndproc_by_hwnd: HashMap<isize, isize>,
         provider_by_hwnd: HashMap<isize, isize>,
         mirror_edit_by_hwnd: HashMap<isize, isize>,
-        pending_focus_restore_by_hwnd: HashMap<isize, isize>,
-        awaiting_commit_probe_restore_by_hwnd: HashSet<isize>,
-        automation_prev_focus_by_hwnd: HashMap<isize, isize>,
         automation_session_by_hwnd: HashMap<isize, Instant>,
     }
 
@@ -151,8 +148,6 @@ mod imp {
     const MIRROR_EDIT_CHILD_ID: isize = 1;
     const EN_CHANGE: usize = 0x0300;
     const WM_SASHIKI_RESTORE_HOST_FOCUS_FOR_PASTE: u32 = 0x8000 + 0x535;
-    const FOCUS_RESTORE_TIMER_ID: usize = 0x5341_5348;
-    const COMMIT_FOCUS_RESTORE_FALLBACK_MS: u32 = 2500;
     const AUTOMATION_SESSION_BEGIN_HOLD: Duration = Duration::from_secs(8);
     const AUTOMATION_SESSION_END_GRACE: Duration = Duration::from_secs(2);
     const AUTOMATION_SESSION_COMMIT_GRACE: Duration = Duration::from_secs(3);
@@ -364,58 +359,51 @@ mod imp {
         if pid != state.process_id {
             return;
         }
-        extend_automation_session(hwnd, AUTOMATION_SESSION_COMMIT_GRACE, "commit");
+        // Only extend and rely on the automation session when it was already
+        // active via begin_automation_input_session. For ordinary character-by-
+        // character typing we still update the mirror edit and fire WinEvents,
+        // but must NOT call SetFocus — that steals keyboard focus for
+        // COMMIT_FOCUS_RESTORE_FALLBACK_MS, blocking all subsequent input.
+        let automation_active = automation_session_active(hwnd);
+        if automation_active {
+            extend_automation_session(hwnd, AUTOMATION_SESSION_COMMIT_GRACE, "commit");
+        }
 
         if let Some(edit_hwnd) = mirror_edit_for(hwnd) {
             let sanitized: String = text.chars().filter(|c| *c != '\0').collect();
-            let utf16_len = sanitized.encode_utf16().count();
             let mut utf16: Vec<u16> = sanitized.encode_utf16().collect();
+            let utf16_len = utf16.len();
             if utf16.is_empty() {
                 utf16.push(' ' as u16);
             }
             utf16.push(0);
-            let restore_focus = take_automation_prev_focus(hwnd).unwrap_or(hwnd);
             unsafe {
-                SetFocus(edit_hwnd);
+                // Update mirror edit content and fire accessibility events so
+                // UIA/MSAA clients can read the committed text. SetFocus is
+                // intentionally omitted — modern clients can query without focus,
+                // and stealing focus blocks all physical keyboard input.
                 SetWindowTextW(edit_hwnd, utf16.as_ptr());
-                let caret = utf16_len;
-                SendMessageW(edit_hwnd, EM_SETSEL_MSG, 0, caret as isize);
+                SendMessageW(edit_hwnd, EM_SETSEL_MSG, 0, utf16_len as isize);
                 NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, edit_hwnd, OBJID_CLIENT, 0);
-                NotifyWinEvent(
-                    EVENT_OBJECT_TEXTSELECTIONCHANGED,
-                    edit_hwnd,
-                    OBJID_CLIENT,
-                    0,
-                );
+                NotifyWinEvent(EVENT_OBJECT_TEXTSELECTIONCHANGED, edit_hwnd, OBJID_CLIENT, 0);
                 NotifyWinEvent(EVENT_OBJECT_LOCATIONCHANGE, edit_hwnd, OBJID_CARET, 0);
-                NotifyWinEvent(EVENT_OBJECT_FOCUS, edit_hwnd, OBJID_CLIENT, 0);
                 // Notify host after mirror state has been committed.
                 NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, hwnd, OBJID_CLIENT, 0);
                 NotifyWinEvent(EVENT_OBJECT_TEXTSELECTIONCHANGED, hwnd, OBJID_CLIENT, 0);
                 NotifyWinEvent(EVENT_OBJECT_LOCATIONCHANGE, hwnd, OBJID_CARET, 0);
                 // Some automation clients subscribe to child-id specific updates.
-                NotifyWinEvent(
-                    EVENT_OBJECT_VALUECHANGE,
-                    hwnd,
-                    OBJID_CLIENT,
-                    MIRROR_EDIT_CHILD_ID as i32,
-                );
-                NotifyWinEvent(
-                    EVENT_OBJECT_TEXTSELECTIONCHANGED,
-                    hwnd,
-                    OBJID_CLIENT,
-                    MIRROR_EDIT_CHILD_ID as i32,
-                );
+                NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, hwnd, OBJID_CLIENT, MIRROR_EDIT_CHILD_ID as i32);
+                NotifyWinEvent(EVENT_OBJECT_TEXTSELECTIONCHANGED, hwnd, OBJID_CLIENT, MIRROR_EDIT_CHILD_ID as i32);
                 let wparam =
                     ((EN_CHANGE as usize) << 16) | ((MIRROR_EDIT_CHILD_ID as usize) & 0xFFFF);
                 SendMessageW(hwnd, WM_COMMAND, wparam, edit_hwnd as isize);
-                schedule_focus_restore_after_probe(hwnd, restore_focus);
             }
             trace_native_input(format!(
-                "notify accessibility text committed hwnd=0x{:X} mirror_edit=0x{:X} len={}",
+                "notify accessibility text committed hwnd=0x{:X} mirror_edit=0x{:X} len={} focus_stole={}",
                 hwnd as usize,
                 edit_hwnd as usize,
-                sanitized.chars().count()
+                sanitized.chars().count(),
+                automation_active,
             ));
             return;
         }
@@ -450,8 +438,9 @@ mod imp {
         };
         extend_automation_session(host_hwnd, AUTOMATION_SESSION_BEGIN_HOLD, "begin");
 
-        let prev_focus = unsafe { SetFocus(edit_hwnd) };
-        remember_automation_prev_focus(host_hwnd, prev_focus);
+        // Do NOT call SetFocus here. Stealing keyboard focus to the mirror edit
+        // blocks all physical keyboard input to GPUI for the session duration.
+        // Modern UIA clients can query the mirror edit without it having focus.
         unsafe {
             NotifyWinEvent(EVENT_OBJECT_FOCUS, edit_hwnd, OBJID_CLIENT, 0);
         }
@@ -577,45 +566,6 @@ mod imp {
             .is_some_and(|deadline| *deadline > now)
     }
 
-    fn remember_automation_prev_focus(host_hwnd: HWND, prev_focus: HWND) {
-        let host_key = host_hwnd as isize;
-        let restore_focus = if prev_focus.is_null() {
-            host_hwnd as isize
-        } else {
-            prev_focus as isize
-        };
-        let Ok(mut bridge) = uia_bridge_state().lock() else {
-            return;
-        };
-        bridge
-            .automation_prev_focus_by_hwnd
-            .entry(host_key)
-            .or_insert(restore_focus);
-    }
-
-    fn take_automation_prev_focus(host_hwnd: HWND) -> Option<HWND> {
-        let host_key = host_hwnd as isize;
-        let Ok(mut bridge) = uia_bridge_state().lock() else {
-            return None;
-        };
-        bridge
-            .automation_prev_focus_by_hwnd
-            .remove(&host_key)
-            .and_then(|hwnd| (hwnd != 0).then_some(hwnd as HWND))
-    }
-
-    fn get_automation_prev_focus(host_hwnd: HWND) -> Option<HWND> {
-        let host_key = host_hwnd as isize;
-        let Ok(bridge) = uia_bridge_state().lock() else {
-            return None;
-        };
-        bridge
-            .automation_prev_focus_by_hwnd
-            .get(&host_key)
-            .copied()
-            .and_then(|hwnd| (hwnd != 0).then_some(hwnd as HWND))
-    }
-
     fn request_restore_host_focus_for_injected_paste(process_id: u32) {
         let host_hwnd = unsafe { GetForegroundWindow() };
         if host_hwnd.is_null() {
@@ -640,71 +590,6 @@ mod imp {
                 host_hwnd as usize, edit_hwnd as usize
             ),
         );
-    }
-
-    fn schedule_focus_restore_after_probe(host_hwnd: HWND, prev_focus: HWND) {
-        let host_key = host_hwnd as isize;
-        let restore_hwnd = if prev_focus.is_null() {
-            host_hwnd
-        } else {
-            prev_focus
-        };
-        let Ok(mut bridge) = uia_bridge_state().lock() else {
-            return;
-        };
-        bridge
-            .pending_focus_restore_by_hwnd
-            .insert(host_key, restore_hwnd as isize);
-        bridge
-            .awaiting_commit_probe_restore_by_hwnd
-            .insert(host_key);
-        drop(bridge);
-
-        unsafe {
-            let _ = SetTimer(
-                host_hwnd,
-                FOCUS_RESTORE_TIMER_ID,
-                COMMIT_FOCUS_RESTORE_FALLBACK_MS,
-                None,
-            );
-        }
-        trace_native_input_once(
-            "focus-restore-waiting-probe",
-            format!(
-                "uia bridge focus restore waiting probe host=0x{:X} fallback_ms={}",
-                host_hwnd as usize, COMMIT_FOCUS_RESTORE_FALLBACK_MS
-            ),
-        );
-    }
-
-    fn handle_focus_restore_timer(host_hwnd: HWND) -> bool {
-        let host_key = host_hwnd as isize;
-        let restore_hwnd = {
-            let Ok(mut bridge) = uia_bridge_state().lock() else {
-                return false;
-            };
-            bridge
-                .awaiting_commit_probe_restore_by_hwnd
-                .remove(&host_key);
-            bridge.automation_prev_focus_by_hwnd.remove(&host_key);
-            bridge.pending_focus_restore_by_hwnd.remove(&host_key)
-        };
-        let Some(restore_hwnd) = restore_hwnd else {
-            return false;
-        };
-        unsafe {
-            let _ = KillTimer(host_hwnd, FOCUS_RESTORE_TIMER_ID);
-            let _ = SetFocus(restore_hwnd as HWND);
-            NotifyWinEvent(EVENT_OBJECT_FOCUS, host_hwnd, OBJID_CLIENT, 0);
-        }
-        trace_native_input_once(
-            "focus-restore-fired",
-            format!(
-                "uia bridge focus restore fired host=0x{:X} target=0x{:X}",
-                host_hwnd as usize, restore_hwnd as usize
-            ),
-        );
-        true
     }
 
     fn run_keyboard_probe_loop() {
@@ -809,25 +694,20 @@ mod imp {
         lparam: LPARAM,
     ) -> LRESULT {
         if msg == WM_SASHIKI_RESTORE_HOST_FOCUS_FOR_PASTE {
-            let target_focus = get_automation_prev_focus(hwnd).unwrap_or(hwnd);
+            // Restore keyboard focus to the host window before an automation
+            // paste so the paste lands in the terminal, not the mirror edit.
             unsafe {
-                let _ = SetFocus(target_focus);
+                let _ = SetFocus(hwnd);
                 NotifyWinEvent(EVENT_OBJECT_FOCUS, hwnd, OBJID_CLIENT, 0);
             }
             trace_native_input_once(
                 "host-focus-restored-before-paste",
                 format!(
-                    "uia bridge restored host focus before paste host=0x{:X} target=0x{:X}",
-                    hwnd as usize, target_focus as usize
+                    "uia bridge restored host focus before paste host=0x{:X}",
+                    hwnd as usize
                 ),
             );
             return 0;
-        }
-
-        if msg == WM_TIMER && wparam == FOCUS_RESTORE_TIMER_ID {
-            if handle_focus_restore_timer(hwnd) {
-                return 0;
-            }
         }
 
         if msg == WM_GETOBJECT {
@@ -1252,15 +1132,7 @@ mod imp {
             if msg == WM_NCDESTROY {
                 bridge.old_wndproc_by_hwnd.remove(&hwnd_key);
                 bridge.provider_by_hwnd.remove(&hwnd_key);
-                bridge.pending_focus_restore_by_hwnd.remove(&hwnd_key);
-                bridge
-                    .awaiting_commit_probe_restore_by_hwnd
-                    .remove(&hwnd_key);
-                bridge.automation_prev_focus_by_hwnd.remove(&hwnd_key);
                 bridge.automation_session_by_hwnd.remove(&hwnd_key);
-                unsafe {
-                    let _ = KillTimer(hwnd, FOCUS_RESTORE_TIMER_ID);
-                }
                 if let Some(edit_hwnd) = bridge.mirror_edit_by_hwnd.remove(&hwnd_key) {
                     let _ = unsafe { DestroyWindow(edit_hwnd as HWND) };
                 }

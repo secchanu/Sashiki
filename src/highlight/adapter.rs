@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
@@ -29,33 +31,61 @@ struct LineMeta {
     end: usize,
 }
 
+// Per-thread cache of Highlighter and HighlightConfiguration instances.
+// HighlightConfiguration compiles tree-sitter queries and is expensive to create;
+// caching it per language eliminates the compilation cost on repeated calls.
+// thread_local! avoids Send/Sync requirements on the tree-sitter raw-pointer types.
+thread_local! {
+    static HIGHLIGHTER: RefCell<Highlighter> = RefCell::new(Highlighter::new());
+    static HIGHLIGHT_CONFIGS: RefCell<HashMap<&'static str, HighlightConfiguration>> =
+        RefCell::new(HashMap::new());
+}
+
 pub fn highlight_source(
     source: &str,
     config: &LanguageConfig,
     capture_names: &[String],
 ) -> Option<HighlightedDoc> {
     let tree_sitter = config.tree_sitter.as_ref()?;
-    let mut highlighter = Highlighter::new();
-    let mut highlight_config = HighlightConfiguration::new(
-        (tree_sitter.language_fn)(),
-        config.id,
-        &tree_sitter.highlights_query,
-        tree_sitter.injections_query.unwrap_or_default(),
-        tree_sitter.locals_query.unwrap_or_default(),
-    )
-    .ok()?;
 
-    highlight_config.configure(capture_names);
+    // Collect all highlight events while holding thread_local borrows.
+    // HighlightEvent contains only indices (no borrows), so collecting into Vec
+    // allows releasing the RefCell borrows before processing events.
+    let events: Vec<HighlightEvent> = HIGHLIGHT_CONFIGS.with(|configs| {
+        let mut configs = configs.borrow_mut();
 
-    let events = highlighter
-        .highlight(&highlight_config, source.as_bytes(), None, |_| None)
-        .ok()?;
+        if !configs.contains_key(config.id) {
+            let mut hl_config = HighlightConfiguration::new(
+                (tree_sitter.language_fn)(),
+                config.id,
+                &tree_sitter.highlights_query,
+                tree_sitter.injections_query.unwrap_or_default(),
+                tree_sitter.locals_query.unwrap_or_default(),
+            )
+            .ok()?;
+            hl_config.configure(capture_names);
+            configs.insert(config.id, hl_config);
+        }
+
+        let hl_config = configs.get(config.id)?;
+
+        // Safe to nest HIGHLIGHTER borrow inside HIGHLIGHT_CONFIGS borrow:
+        // the injection callback `|_| None` prevents re-entrant calls to
+        // highlight_source, so neither RefCell will be double-borrowed.
+        HIGHLIGHTER.with(|h| {
+            let mut h = h.borrow_mut();
+            h.highlight(hl_config, source.as_bytes(), None, |_| None)
+                .ok()?
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+        })
+    })?;
 
     let (mut lines, line_meta) = build_lines(source);
     let mut highlight_stack: Vec<Highlight> = Vec::new();
 
     for event in events {
-        match event.ok()? {
+        match event {
             HighlightEvent::HighlightStart(highlight) => highlight_stack.push(highlight),
             HighlightEvent::HighlightEnd => {
                 let _ = highlight_stack.pop();

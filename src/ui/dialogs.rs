@@ -3,16 +3,75 @@
 use crate::app::SashikiApp;
 use crate::git::StashMode;
 use crate::theme::*;
+use crate::ui::text_input::{normalize_single_line_text, insert_caret_marker, selection_ranges_in_display_text, selection_highlight_style};
+use crate::ui::TextInput;
 use gpui::{
-    AnyElement, ClipboardItem, Context, HighlightStyle, Hsla, IntoElement, KeyDownEvent,
-    ParentElement, Styled, StyledText, div, prelude::*, px, rgb, rgba,
+    AnyElement, ClipboardItem, Context, ElementInputHandler, Entity, HighlightStyle,
+    IntoElement, KeyDownEvent, ParentElement, Styled, StyledText, canvas, div, prelude::*, px,
+    rgb, rgba,
 };
 
 impl SashikiApp {
+    /// Handle clipboard (Ctrl+A/C/X/V) and general text-editing keys for a dialog text input.
+    /// Returns `true` when `cx.notify()` should be called.
+    /// Escape / Enter / dialog-specific shortcuts are handled by each caller before invoking this.
+    fn handle_text_input_keys(
+        &mut self,
+        event: &KeyDownEvent,
+        entity: Entity<TextInput>,
+        multiline: bool,
+        char_allowed: impl Fn(char) -> bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let key = &event.keystroke.key;
+        let modifiers = event.keystroke.modifiers;
+        let primary_mod = modifiers.control || modifiers.platform;
+        if primary_mod && key == "a" {
+            entity.update(cx, |input, _| input.select_all());
+            return true;
+        }
+        if primary_mod && key == "c" {
+            if let Some(text) = entity.read(cx).get_selected_text() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            return false;
+        }
+        if primary_mod && key == "x" {
+            if let Some(text) = entity.update(cx, |input, _| input.cut_selection()) {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                return true;
+            }
+            return false;
+        }
+        if primary_mod && key == "v" {
+            let clip = cx.read_from_clipboard().and_then(|item| item.text());
+            if let Some(clip_text) = clip {
+                // Single-line inputs normalise newlines to spaces on paste.
+                let text = if !multiline {
+                    normalize_single_line_text(&clip_text)
+                } else {
+                    clip_text
+                };
+                entity.update(cx, |input, _| input.insert(&text));
+                return true;
+            }
+            return false;
+        }
+        if !primary_mod && !modifiers.alt {
+            let key_char = event.keystroke.key_char.clone();
+            let shift = modifiers.shift;
+            let key = key.to_string();
+            return entity.update(cx, |input, _| {
+                input.handle_editing_key(&key, key_char.as_deref(), shift, multiline, char_allowed)
+            });
+        }
+        false
+    }
+
     pub fn render_create_dialog(&self, cx: &Context<Self>) -> AnyElement {
-        let input_value = self.create_branch_input.clone();
-        let cursor = self.create_branch_cursor.min(input_value.chars().count());
-        let selection_anchor = self.create_branch_selection_anchor;
+        let styled = self.create_input.read(cx).render_styled();
+        let input_entity = self.create_input.clone();
+        let focus = self.create_dialog_focus.clone();
 
         div()
             .id("create-dialog-container")
@@ -21,119 +80,17 @@ impl SashikiApp {
             .inset_0()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke.key;
-                let primary_mod =
-                    event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
                 if key == "escape" {
                     this.close_create_dialog(window, cx);
                 } else if key == "enter" {
                     this.submit_create_worktree(window, cx);
-                } else if primary_mod && key == "a" {
-                    select_all_text(
-                        &this.create_branch_input,
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                    );
-                    cx.notify();
-                } else if primary_mod && key == "c" {
-                    copy_selection_to_clipboard(
-                        &this.create_branch_input,
-                        this.create_branch_cursor,
-                        this.create_branch_selection_anchor,
-                        cx,
-                    );
-                } else if primary_mod && key == "x" {
-                    if cut_selection_to_clipboard(
-                        &mut this.create_branch_input,
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                        cx,
-                    ) {
+                } else {
+                    let entity = this.create_input.clone();
+                    if this.handle_text_input_keys(event, entity, false, |c| {
+                        c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | '@')
+                    }, cx) {
                         cx.notify();
                     }
-                } else if primary_mod && key == "v" {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        let normalized = normalize_single_line_text(&text);
-                        replace_selection_with_text(
-                            &mut this.create_branch_input,
-                            &mut this.create_branch_cursor,
-                            &mut this.create_branch_selection_anchor,
-                            &normalized,
-                        );
-                        cx.notify();
-                    }
-                } else if key == "backspace" {
-                    if backspace_text(
-                        &mut this.create_branch_input,
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                    ) {
-                        cx.notify();
-                    }
-                } else if key == "delete" {
-                    if delete_text(
-                        &mut this.create_branch_input,
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                    ) {
-                        cx.notify();
-                    }
-                } else if key == "left" {
-                    let current = this.create_branch_cursor;
-                    move_text_cursor(
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                        current.saturating_sub(1),
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "right" {
-                    let current = this.create_branch_cursor;
-                    let next = (current + 1).min(this.create_branch_input.chars().count());
-                    move_text_cursor(
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                        next,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "home" {
-                    move_text_cursor(
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                        0,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "end" {
-                    let end = this.create_branch_input.chars().count();
-                    move_text_cursor(
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                        end,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "space" {
-                    replace_selection_with_text(
-                        &mut this.create_branch_input,
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                        " ",
-                    );
-                    cx.notify();
-                } else if let Some(c) = key.chars().next()
-                    && key.chars().count() == 1
-                    && !primary_mod
-                    && !event.keystroke.modifiers.alt
-                    && (c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | '@'))
-                {
-                    replace_selection_with_text(
-                        &mut this.create_branch_input,
-                        &mut this.create_branch_cursor,
-                        &mut this.create_branch_selection_anchor,
-                        &c.to_string(),
-                    );
-                    cx.notify();
                 }
             }))
             .child(
@@ -205,21 +162,9 @@ impl SashikiApp {
                                             .border_color(rgb(BLUE))
                                             .rounded_sm()
                                             .cursor_text()
-                                            .text_color(if input_value.is_empty() {
-                                                rgb(TEXT_MUTED)
-                                            } else {
-                                                rgb(TEXT)
-                                            })
+                                            .text_color(rgb(TEXT))
                                             .text_sm()
-                                            .child(if input_value.is_empty() {
-                                                StyledText::new("feature/my-branch")
-                                            } else {
-                                                render_text_with_selection_and_caret(
-                                                    &input_value,
-                                                    cursor,
-                                                    selection_anchor,
-                                                )
-                                            }),
+                                            .child(styled),
                                     )
                                     .child(
                                         div()
@@ -272,14 +217,28 @@ impl SashikiApp {
                             ),
                     ),
             )
+            .child(
+                canvas(
+                    |bounds, _w, _cx| bounds,
+                    move |bounds, _, window, cx| {
+                        window.handle_input(
+                            &focus,
+                            ElementInputHandler::new(bounds, input_entity),
+                            cx,
+                        );
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .into_any_element()
     }
 
     pub fn render_commit_dialog(&self, cx: &Context<Self>) -> AnyElement {
-        let message = self.commit_message_input.clone();
-        let cursor = self.commit_message_cursor.min(message.chars().count());
-        let selection_anchor = self.commit_message_selection_anchor;
+        let styled = self.commit_input.read(cx).render_styled();
+        let input_entity = self.commit_input.clone();
         let amend_mode = self.commit_amend_mode;
+        let focus = self.commit_dialog_focus.clone();
 
         div()
             .id("commit-dialog-container")
@@ -288,156 +247,16 @@ impl SashikiApp {
             .inset_0()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke.key;
-                let primary_mod =
-                    event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+                let modifiers = event.keystroke.modifiers;
                 if key == "escape" {
                     this.close_commit_dialog(window, cx);
-                } else if key == "enter" && !event.keystroke.modifiers.shift {
+                } else if key == "enter" && !modifiers.shift {
                     this.submit_commit(window, cx);
-                } else if key == "enter" {
-                    replace_selection_with_text(
-                        &mut this.commit_message_input,
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        "\n",
-                    );
-                    cx.notify();
-                } else if primary_mod && key == "a" {
-                    select_all_text(
-                        &this.commit_message_input,
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                    );
-                    cx.notify();
-                } else if primary_mod && key == "c" {
-                    copy_selection_to_clipboard(
-                        &this.commit_message_input,
-                        this.commit_message_cursor,
-                        this.commit_message_selection_anchor,
-                        cx,
-                    );
-                } else if primary_mod && key == "x" {
-                    if cut_selection_to_clipboard(
-                        &mut this.commit_message_input,
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        cx,
-                    ) {
+                } else {
+                    let entity = this.commit_input.clone();
+                    if this.handle_text_input_keys(event, entity, true, |_| true, cx) {
                         cx.notify();
                     }
-                } else if primary_mod && key == "v" {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        replace_selection_with_text(
-                            &mut this.commit_message_input,
-                            &mut this.commit_message_cursor,
-                            &mut this.commit_message_selection_anchor,
-                            &text,
-                        );
-                        cx.notify();
-                    }
-                } else if key == "backspace" {
-                    if backspace_text(
-                        &mut this.commit_message_input,
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                    ) {
-                        cx.notify();
-                    }
-                } else if key == "delete" {
-                    if delete_text(
-                        &mut this.commit_message_input,
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                    ) {
-                        cx.notify();
-                    }
-                } else if key == "left" {
-                    let current = this.commit_message_cursor;
-                    move_text_cursor(
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        current.saturating_sub(1),
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "right" {
-                    let current = this.commit_message_cursor;
-                    let next = (current + 1).min(this.commit_message_input.chars().count());
-                    move_text_cursor(
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        next,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "up" {
-                    let current = this.commit_message_cursor;
-                    let (line, col) = cursor_to_line_col(&this.commit_message_input, current);
-                    let next = if line == 0 {
-                        0
-                    } else {
-                        line_col_to_cursor(&this.commit_message_input, line - 1, col)
-                    };
-                    move_text_cursor(
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        next,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "down" {
-                    let current = this.commit_message_cursor;
-                    let (line, col) = cursor_to_line_col(&this.commit_message_input, current);
-                    let next = line_col_to_cursor(&this.commit_message_input, line + 1, col);
-                    move_text_cursor(
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        next,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "home" {
-                    let current = this.commit_message_cursor;
-                    let (line, _) = cursor_to_line_col(&this.commit_message_input, current);
-                    let next = line_col_to_cursor(&this.commit_message_input, line, 0);
-                    move_text_cursor(
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        next,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "end" {
-                    let current = this.commit_message_cursor;
-                    let (line, _) = cursor_to_line_col(&this.commit_message_input, current);
-                    let next = line_col_to_cursor(&this.commit_message_input, line, usize::MAX);
-                    move_text_cursor(
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        next,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "space" {
-                    replace_selection_with_text(
-                        &mut this.commit_message_input,
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        " ",
-                    );
-                    cx.notify();
-                } else if let Some(c) = key.chars().next()
-                    && key.chars().count() == 1
-                    && !primary_mod
-                    && !event.keystroke.modifiers.alt
-                {
-                    replace_selection_with_text(
-                        &mut this.commit_message_input,
-                        &mut this.commit_message_cursor,
-                        &mut this.commit_message_selection_anchor,
-                        &c.to_string(),
-                    );
-                    cx.notify();
                 }
             }))
             .child(
@@ -516,9 +335,7 @@ impl SashikiApp {
                                                 if this.commit_amend_mode {
                                                     // amendモード解除: メッセージをクリア
                                                     this.commit_amend_mode = false;
-                                                    this.commit_message_input.clear();
-                                                    this.commit_message_cursor = 0;
-                                                    this.commit_message_selection_anchor = None;
+                                                    this.commit_input.update(cx, |input, _| input.clear());
                                                     cx.notify();
                                                 } else {
                                                     // amendモードへ: 最後のコミットメッセージをプリフィル
@@ -551,21 +368,10 @@ impl SashikiApp {
                                             .border_1()
                                             .border_color(rgb(BLUE))
                                             .rounded_sm()
-                                            .text_color(if message.is_empty() {
-                                                rgb(TEXT_MUTED)
-                                            } else {
-                                                rgb(TEXT)
-                                            })
+                                            .cursor_text()
+                                            .text_color(rgb(TEXT))
                                             .text_sm()
-                                            .child(if message.is_empty() {
-                                                StyledText::new("feat: summarize reviewed changes")
-                                            } else {
-                                                render_text_with_selection_and_caret(
-                                                    &message,
-                                                    cursor,
-                                                    selection_anchor,
-                                                )
-                                            }),
+                                            .child(styled),
                                     )
                                     .child(
                                         div()
@@ -618,6 +424,20 @@ impl SashikiApp {
                             ),
                     ),
             )
+            .child(
+                canvas(
+                    |bounds, _w, _cx| bounds,
+                    move |bounds, _, window, cx| {
+                        window.handle_input(
+                            &focus,
+                            ElementInputHandler::new(bounds, input_entity),
+                            cx,
+                        );
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .into_any_element()
     }
 
@@ -647,10 +467,10 @@ impl SashikiApp {
     }
 
     pub fn render_stash_dialog(&self, cx: &Context<Self>) -> AnyElement {
-        let message = self.stash_message_input.clone();
-        let cursor = self.stash_message_cursor.min(message.chars().count());
-        let selection_anchor = self.stash_message_selection_anchor;
+        let styled = self.stash_input.read(cx).render_styled();
+        let input_entity = self.stash_input.clone();
         let entries = self.stash_entries.clone();
+        let focus = self.stash_dialog_focus.clone();
 
         div()
             .id("stash-dialog-container")
@@ -659,118 +479,15 @@ impl SashikiApp {
             .inset_0()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke.key;
-                let primary_mod =
-                    event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
                 if key == "escape" {
                     this.close_stash_dialog(window, cx);
                 } else if key == "enter" {
                     this.create_stash(cx);
-                } else if primary_mod && key == "a" {
-                    select_all_text(
-                        &this.stash_message_input,
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                    );
-                    cx.notify();
-                } else if primary_mod && key == "c" {
-                    copy_selection_to_clipboard(
-                        &this.stash_message_input,
-                        this.stash_message_cursor,
-                        this.stash_message_selection_anchor,
-                        cx,
-                    );
-                } else if primary_mod && key == "x" {
-                    if cut_selection_to_clipboard(
-                        &mut this.stash_message_input,
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                        cx,
-                    ) {
+                } else {
+                    let entity = this.stash_input.clone();
+                    if this.handle_text_input_keys(event, entity, false, |_| true, cx) {
                         cx.notify();
                     }
-                } else if primary_mod && key == "v" {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        let normalized = normalize_single_line_text(&text);
-                        replace_selection_with_text(
-                            &mut this.stash_message_input,
-                            &mut this.stash_message_cursor,
-                            &mut this.stash_message_selection_anchor,
-                            &normalized,
-                        );
-                        cx.notify();
-                    }
-                } else if key == "backspace" {
-                    if backspace_text(
-                        &mut this.stash_message_input,
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                    ) {
-                        cx.notify();
-                    }
-                } else if key == "delete" {
-                    if delete_text(
-                        &mut this.stash_message_input,
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                    ) {
-                        cx.notify();
-                    }
-                } else if key == "left" {
-                    let current = this.stash_message_cursor;
-                    move_text_cursor(
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                        current.saturating_sub(1),
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "right" {
-                    let current = this.stash_message_cursor;
-                    let next = (current + 1).min(this.stash_message_input.chars().count());
-                    move_text_cursor(
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                        next,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "home" {
-                    move_text_cursor(
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                        0,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "end" {
-                    let end = this.stash_message_input.chars().count();
-                    move_text_cursor(
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                        end,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "space" {
-                    replace_selection_with_text(
-                        &mut this.stash_message_input,
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                        " ",
-                    );
-                    cx.notify();
-                } else if let Some(c) = key.chars().next()
-                    && key.chars().count() == 1
-                    && !primary_mod
-                    && !event.keystroke.modifiers.alt
-                {
-                    replace_selection_with_text(
-                        &mut this.stash_message_input,
-                        &mut this.stash_message_cursor,
-                        &mut this.stash_message_selection_anchor,
-                        &c.to_string(),
-                    );
-                    cx.notify();
                 }
             }))
             .child(
@@ -841,21 +558,10 @@ impl SashikiApp {
                                             .border_1()
                                             .border_color(rgb(BLUE))
                                             .rounded_sm()
-                                            .text_color(if message.is_empty() {
-                                                rgb(TEXT_MUTED)
-                                            } else {
-                                                rgb(TEXT)
-                                            })
+                                            .cursor_text()
+                                            .text_color(rgb(TEXT))
                                             .text_sm()
-                                            .child(if message.is_empty() {
-                                                StyledText::new("wip: save current changes")
-                                            } else {
-                                                render_text_with_selection_and_caret(
-                                                    &message,
-                                                    cursor,
-                                                    selection_anchor,
-                                                )
-                                            }),
+                                            .child(styled),
                                     )
                                     // スタッシュ範囲選択: [All] [Staged] [+Untracked]
                                     .child({
@@ -1165,6 +871,20 @@ impl SashikiApp {
                                     ),
                             ),
                     ),
+            )
+            .child(
+                canvas(
+                    |bounds, _w, _cx| bounds,
+                    move |bounds, _, window, cx| {
+                        window.handle_input(
+                            &focus,
+                            ElementInputHandler::new(bounds, input_entity),
+                            cx,
+                        );
+                    },
+                )
+                .absolute()
+                .inset_0(),
             )
             .into_any_element()
     }
@@ -2110,9 +1830,19 @@ impl SashikiApp {
 
     pub fn render_template_settings_dialog(&self, cx: &Context<Self>) -> AnyElement {
         let active_section = self.settings_active_section;
-        let inputs: Vec<String> = self.settings_inputs.iter().cloned().collect();
-        let cursors = self.settings_cursors;
-        let selection_anchors = self.settings_selection_anchors;
+        // Read all section data upfront
+        let inputs: Vec<String> = self.settings_inputs.iter()
+            .map(|e| e.read(cx).text().to_string())
+            .collect();
+        let cursors: Vec<usize> = self.settings_inputs.iter()
+            .map(|e| e.read(cx).cursor())
+            .collect();
+        let selection_anchors: Vec<Option<usize>> = self.settings_inputs.iter()
+            .map(|e| e.read(cx).selection_anchor())
+            .collect();
+        let active_preedit = self.settings_inputs[active_section].read(cx).preedit().to_string();
+        let settings_entity = self.settings_inputs[active_section].clone();
+        let focus = self.settings_dialog_focus.clone();
         let group_name = self
             .session_manager
             .groups()
@@ -2127,176 +1857,28 @@ impl SashikiApp {
             .inset_0()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = &event.keystroke.key;
+                let modifiers = event.keystroke.modifiers;
+                let primary_mod = modifiers.control || modifiers.platform;
                 let sec = this.settings_active_section;
-                let primary_mod =
-                    event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
-
                 if key == "escape" {
                     this.close_template_settings(window, cx);
                 } else if primary_mod && key == "s" {
                     this.save_template_settings(window, cx);
-                } else if primary_mod && key == "a" {
-                    select_all_text(
-                        &this.settings_inputs[sec],
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                    );
-                    cx.notify();
-                } else if primary_mod && key == "c" {
-                    copy_selection_to_clipboard(
-                        &this.settings_inputs[sec],
-                        this.settings_cursors[sec],
-                        this.settings_selection_anchors[sec],
-                        cx,
-                    );
-                } else if primary_mod && key == "x" {
-                    if cut_selection_to_clipboard(
-                        &mut this.settings_inputs[sec],
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        cx,
-                    ) {
-                        cx.notify();
-                    }
-                } else if primary_mod && key == "v" {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        let inserted = if sec == 4 {
-                            normalize_single_line_text(&text)
-                        } else {
-                            text
-                        };
-                        replace_selection_with_text(
-                            &mut this.settings_inputs[sec],
-                            &mut this.settings_cursors[sec],
-                            &mut this.settings_selection_anchors[sec],
-                            &inserted,
-                        );
-                        cx.notify();
-                    }
                 } else if key == "tab" {
-                    if event.keystroke.modifiers.shift {
-                        this.settings_active_section = if sec == 0 { 4 } else { sec - 1 };
+                    this.settings_active_section = if modifiers.shift {
+                        if sec == 0 { 4 } else { sec - 1 }
                     } else {
-                        this.settings_active_section = (sec + 1) % 5;
-                    }
-                    cx.notify();
-                } else if key == "enter" {
-                    if sec == 4 {
-                        this.save_template_settings(window, cx);
-                        return;
-                    }
-                    replace_selection_with_text(
-                        &mut this.settings_inputs[sec],
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        "\n",
-                    );
-                    cx.notify();
-                } else if key == "backspace" {
-                    if backspace_text(
-                        &mut this.settings_inputs[sec],
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                    ) {
-                        cx.notify();
-                    }
-                } else if key == "delete" {
-                    if delete_text(
-                        &mut this.settings_inputs[sec],
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                    ) {
-                        cx.notify();
-                    }
-                } else if key == "left" {
-                    let current = this.settings_cursors[sec];
-                    move_text_cursor(
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        current.saturating_sub(1),
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "right" {
-                    let char_count = this.settings_inputs[sec].chars().count();
-                    let cursor = this.settings_cursors[sec];
-                    move_text_cursor(
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        (cursor + 1).min(char_count),
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "up" {
-                    let cursor = this.settings_cursors[sec];
-                    let text = &this.settings_inputs[sec];
-                    let (line, col) = cursor_to_line_col(text, cursor);
-                    let new_cursor = if line > 0 {
-                        line_col_to_cursor(text, line - 1, col)
-                    } else {
-                        0
+                        (sec + 1) % 5
                     };
-                    move_text_cursor(
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        new_cursor,
-                        event.keystroke.modifiers.shift,
-                    );
                     cx.notify();
-                } else if key == "down" {
-                    let cursor = this.settings_cursors[sec];
-                    let text = &this.settings_inputs[sec];
-                    let (line, col) = cursor_to_line_col(text, cursor);
-                    let new_cursor = line_col_to_cursor(text, line + 1, col);
-                    move_text_cursor(
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        new_cursor,
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "home" {
-                    let cursor = this.settings_cursors[sec];
-                    let text = &this.settings_inputs[sec];
-                    let (line, _) = cursor_to_line_col(text, cursor);
-                    move_text_cursor(
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        line_col_to_cursor(text, line, 0),
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "end" {
-                    let cursor = this.settings_cursors[sec];
-                    let text = &this.settings_inputs[sec];
-                    let (line, _) = cursor_to_line_col(text, cursor);
-                    move_text_cursor(
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        line_col_to_cursor(text, line, usize::MAX),
-                        event.keystroke.modifiers.shift,
-                    );
-                    cx.notify();
-                } else if key == "space" {
-                    replace_selection_with_text(
-                        &mut this.settings_inputs[sec],
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        " ",
-                    );
-                    cx.notify();
-                } else if let Some(c) = key.chars().next()
-                    && key.chars().count() == 1
-                    && !primary_mod
-                    && !event.keystroke.modifiers.alt
-                {
-                    replace_selection_with_text(
-                        &mut this.settings_inputs[sec],
-                        &mut this.settings_cursors[sec],
-                        &mut this.settings_selection_anchors[sec],
-                        &c.to_string(),
-                    );
-                    cx.notify();
+                } else if key == "enter" && sec == 4 {
+                    this.save_template_settings(window, cx);
+                } else {
+                    let entity = this.settings_inputs[sec].clone();
+                    let multiline = sec != 4;
+                    if this.handle_text_input_keys(event, entity, multiline, |_| true, cx) {
+                        cx.notify();
+                    }
                 }
             }))
             .child(
@@ -2365,6 +1947,7 @@ impl SashikiApp {
                                         0,
                                         active_section,
                                         true,
+                                        &active_preedit,
                                         cx,
                                     ))
                                     .child(Self::render_textarea_section(
@@ -2376,6 +1959,7 @@ impl SashikiApp {
                                         1,
                                         active_section,
                                         true,
+                                        &active_preedit,
                                         cx,
                                     ))
                                     .child(Self::render_textarea_section(
@@ -2387,6 +1971,7 @@ impl SashikiApp {
                                         2,
                                         active_section,
                                         true,
+                                        &active_preedit,
                                         cx,
                                     ))
                                     .child(
@@ -2406,6 +1991,7 @@ impl SashikiApp {
                                         3,
                                         active_section,
                                         true,
+                                        &active_preedit,
                                         cx,
                                     ))
                                     .child(
@@ -2427,6 +2013,7 @@ impl SashikiApp {
                                         4,
                                         active_section,
                                         false,
+                                        &active_preedit,
                                         cx,
                                     ))
                                     .child(
@@ -2485,6 +2072,20 @@ impl SashikiApp {
                             ),
                     ),
             )
+            .child(
+                canvas(
+                    |bounds, _w, _cx| bounds,
+                    move |bounds, _, window, cx| {
+                        window.handle_input(
+                            &focus,
+                            ElementInputHandler::new(bounds, settings_entity),
+                            cx,
+                        );
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .into_any_element()
     }
 
@@ -2497,9 +2098,11 @@ impl SashikiApp {
         section_index: usize,
         active_section: usize,
         multiline: bool,
+        preedit: &str,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let is_active = section_index == active_section;
+        let preedit = if is_active { preedit } else { "" };
         let title = title.to_string();
         let is_empty = content.is_empty();
         let sec = section_index;
@@ -2533,7 +2136,7 @@ impl SashikiApp {
                 cx.notify();
             }));
 
-        if is_empty {
+        if is_empty && preedit.is_empty() {
             if is_active {
                 textarea = textarea.child(
                     div()
@@ -2551,7 +2154,14 @@ impl SashikiApp {
             }
         } else {
             let rendered = if is_active {
-                insert_caret_marker(content, cursor)
+                // Insert caret, then append preedit after it
+                let base = insert_caret_marker(content, cursor);
+                if !preedit.is_empty() {
+                    let cursor_byte = base.find('|').map(|i| i + 1).unwrap_or(base.len());
+                    format!("{}{}{}", &base[..cursor_byte], preedit, &base[cursor_byte..])
+                } else {
+                    base
+                }
             } else {
                 content.to_string()
             };
@@ -3276,251 +2886,4 @@ impl SashikiApp {
             }))
             .child(label_owned)
     }
-}
-
-fn normalize_single_line_text(text: &str) -> String {
-    text.chars()
-        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-        .collect()
-}
-
-fn render_text_with_selection_and_caret(
-    text: &str,
-    cursor: usize,
-    selection_anchor: Option<usize>,
-) -> StyledText {
-    let rendered = insert_caret_marker(text, cursor);
-    let highlights = selection_ranges_in_display_text(text, cursor, selection_anchor)
-        .into_iter()
-        .map(|range| (range, selection_highlight_style()));
-    StyledText::new(rendered).with_highlights(highlights)
-}
-
-fn selection_highlight_style() -> HighlightStyle {
-    HighlightStyle {
-        background_color: Some(Hsla::from(rgba(0x74a9e455))),
-        ..HighlightStyle::default()
-    }
-}
-
-fn insert_caret_marker(text: &str, cursor: usize) -> String {
-    let cursor = cursor.min(text.chars().count());
-    let byte_pos = char_to_byte_offset(text, cursor);
-    let (before, after) = text.split_at(byte_pos);
-    format!("{}|{}", before, after)
-}
-
-fn selection_ranges_in_display_text(
-    text: &str,
-    cursor: usize,
-    selection_anchor: Option<usize>,
-) -> Vec<std::ops::Range<usize>> {
-    let Some((start, end)) = selected_char_range(cursor, selection_anchor) else {
-        return Vec::new();
-    };
-
-    let cursor = cursor.min(text.chars().count());
-    let display_start = if start >= cursor { start + 1 } else { start };
-    let display_end = if end > cursor { end + 1 } else { end };
-    let rendered = insert_caret_marker(text, cursor);
-    let byte_start = char_to_byte_offset(&rendered, display_start);
-    let byte_end = char_to_byte_offset(&rendered, display_end);
-    if byte_start < byte_end {
-        vec![byte_start..byte_end]
-    } else {
-        Vec::new()
-    }
-}
-
-fn selected_char_range(cursor: usize, selection_anchor: Option<usize>) -> Option<(usize, usize)> {
-    let anchor = selection_anchor?;
-    if anchor == cursor {
-        None
-    } else {
-        Some((anchor.min(cursor), anchor.max(cursor)))
-    }
-}
-
-fn move_text_cursor(
-    cursor: &mut usize,
-    selection_anchor: &mut Option<usize>,
-    next_cursor: usize,
-    selecting: bool,
-) {
-    if selecting {
-        if selection_anchor.is_none() {
-            *selection_anchor = Some(*cursor);
-        }
-        *cursor = next_cursor;
-    } else {
-        *cursor = next_cursor;
-        *selection_anchor = None;
-    }
-}
-
-fn select_all_text(text: &str, cursor: &mut usize, selection_anchor: &mut Option<usize>) {
-    *selection_anchor = Some(0);
-    *cursor = text.chars().count();
-}
-
-fn slice_char_range(text: &str, start: usize, end: usize) -> String {
-    let byte_start = char_to_byte_offset(text, start);
-    let byte_end = char_to_byte_offset(text, end);
-    text[byte_start..byte_end].to_string()
-}
-
-fn copy_selection_to_clipboard(
-    text: &str,
-    cursor: usize,
-    selection_anchor: Option<usize>,
-    cx: &mut Context<SashikiApp>,
-) -> bool {
-    if let Some((start, end)) = selected_char_range(cursor, selection_anchor) {
-        let selected = slice_char_range(text, start, end);
-        cx.write_to_clipboard(ClipboardItem::new_string(selected));
-        true
-    } else {
-        false
-    }
-}
-
-fn delete_selected_text(
-    text: &mut String,
-    cursor: &mut usize,
-    selection_anchor: &mut Option<usize>,
-) -> bool {
-    if let Some((start, end)) = selected_char_range(*cursor, *selection_anchor) {
-        let byte_start = char_to_byte_offset(text, start);
-        let byte_end = char_to_byte_offset(text, end);
-        text.replace_range(byte_start..byte_end, "");
-        *cursor = start;
-        *selection_anchor = None;
-        true
-    } else {
-        false
-    }
-}
-
-fn cut_selection_to_clipboard(
-    text: &mut String,
-    cursor: &mut usize,
-    selection_anchor: &mut Option<usize>,
-    cx: &mut Context<SashikiApp>,
-) -> bool {
-    if let Some((start, end)) = selected_char_range(*cursor, *selection_anchor) {
-        let selected = slice_char_range(text, start, end);
-        cx.write_to_clipboard(ClipboardItem::new_string(selected));
-        delete_selected_text(text, cursor, selection_anchor)
-    } else {
-        false
-    }
-}
-
-fn replace_selection_with_text(
-    text: &mut String,
-    cursor: &mut usize,
-    selection_anchor: &mut Option<usize>,
-    inserted: &str,
-) -> bool {
-    let had_selection = delete_selected_text(text, cursor, selection_anchor);
-    if inserted.is_empty() {
-        return had_selection;
-    }
-
-    let byte_pos = char_to_byte_offset(text, *cursor);
-    text.insert_str(byte_pos, inserted);
-    *cursor += inserted.chars().count();
-    *selection_anchor = None;
-    true
-}
-
-fn backspace_text(
-    text: &mut String,
-    cursor: &mut usize,
-    selection_anchor: &mut Option<usize>,
-) -> bool {
-    if delete_selected_text(text, cursor, selection_anchor) {
-        return true;
-    }
-    if *cursor == 0 {
-        return false;
-    }
-    let byte_start = char_to_byte_offset(text, *cursor - 1);
-    let byte_end = char_to_byte_offset(text, *cursor);
-    text.replace_range(byte_start..byte_end, "");
-    *cursor -= 1;
-    *selection_anchor = None;
-    true
-}
-
-fn delete_text(
-    text: &mut String,
-    cursor: &mut usize,
-    selection_anchor: &mut Option<usize>,
-) -> bool {
-    if delete_selected_text(text, cursor, selection_anchor) {
-        return true;
-    }
-    let len = text.chars().count();
-    if *cursor >= len {
-        return false;
-    }
-    let byte_start = char_to_byte_offset(text, *cursor);
-    let byte_end = char_to_byte_offset(text, *cursor + 1);
-    text.replace_range(byte_start..byte_end, "");
-    *selection_anchor = None;
-    true
-}
-
-/// Get (line, col) from a char-based cursor position in text.
-fn cursor_to_line_col(text: &str, cursor: usize) -> (usize, usize) {
-    let mut line = 0;
-    let mut col = 0;
-    for (i, c) in text.chars().enumerate() {
-        if i == cursor {
-            return (line, col);
-        }
-        if c == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
-}
-
-/// Get char-based cursor position from (line, col).
-/// Clamps col to the end of the target line if it exceeds the line length.
-fn line_col_to_cursor(text: &str, target_line: usize, target_col: usize) -> usize {
-    let mut line = 0;
-    let mut col = 0;
-    for (i, c) in text.chars().enumerate() {
-        if line == target_line && col == target_col {
-            return i;
-        }
-        if c == '\n' {
-            if line == target_line {
-                return i;
-            }
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    if line == target_line {
-        text.chars().count()
-    } else {
-        // target_line is beyond last line, clamp to end of text
-        text.chars().count()
-    }
-}
-
-/// Convert a char offset to a byte offset in a string.
-fn char_to_byte_offset(text: &str, char_offset: usize) -> usize {
-    text.char_indices()
-        .nth(char_offset)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len())
 }

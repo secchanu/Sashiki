@@ -7,6 +7,9 @@ pub mod file_view;
 pub mod render;
 pub mod sidebar;
 pub mod terminal;
+pub mod text_input;
+
+pub use text_input::TextInput;
 
 pub use file_tree::{ChangeInfo, ChangeSection, FileListMode, FileTreeNode, read_dir_shallow};
 pub use file_view::{

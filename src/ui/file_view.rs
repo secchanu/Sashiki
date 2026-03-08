@@ -6,9 +6,11 @@ use crate::theme::*;
 use crate::ui::ChangeSection;
 use gpui::{
     AnyElement, App, Context, DefiniteLength, EventEmitter, FocusHandle, Focusable,
-    InteractiveText, IntoElement, MouseButton, ParentElement, Render, ScrollHandle, Styled,
-    StyledText, Window, div, prelude::*, px, rgb,
+    InteractiveText, IntoElement, MouseButton, ParentElement, Render, ScrollHandle,
+    ScrollStrategy, Styled, StyledText, UniformListScrollHandle, Window, div, prelude::*, px, rgb,
+    uniform_list,
 };
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -119,12 +121,12 @@ pub struct FileView {
     cached_right_lines: Rc<Vec<SplitDiffLine>>,
     /// Rc-wrapped inline diff lines (recomputed only when diff changes)
     cached_inline_lines: Rc<Vec<InlineDiffLine>>,
-    /// Shared scroll handle for synchronized split diff scrolling
-    diff_scroll_handle: ScrollHandle,
+    /// Shared scroll handle for synchronized split diff scrolling (uniform_list)
+    diff_scroll_handle: UniformListScrollHandle,
     /// Scroll handle for content view (enables scroll_to_item for go-to-definition)
     content_scroll_handle: ScrollHandle,
-    /// Scroll handle for inline diff view
-    inline_scroll_handle: ScrollHandle,
+    /// Scroll handle for inline diff view (uniform_list)
+    inline_scroll_handle: UniformListScrollHandle,
     /// Target line to scroll to after opening a file (1-based)
     target_line: Option<usize>,
     current_change_section: Option<ChangeSection>,
@@ -157,9 +159,9 @@ impl FileView {
             cached_left_lines: Rc::new(Vec::new()),
             cached_right_lines: Rc::new(Vec::new()),
             cached_inline_lines: Rc::new(Vec::new()),
-            diff_scroll_handle: ScrollHandle::new(),
+            diff_scroll_handle: UniformListScrollHandle::new(),
             content_scroll_handle: ScrollHandle::new(),
-            inline_scroll_handle: ScrollHandle::new(),
+            inline_scroll_handle: UniformListScrollHandle::new(),
             target_line: None,
             current_change_section: None,
             current_change_type: None,
@@ -545,17 +547,53 @@ impl FileView {
 
     fn compute_split_diff(&self) -> (Vec<SplitDiffLine>, Vec<SplitDiffLine>) {
         let diff = self.diff_content.as_deref().unwrap_or("");
+        let content_lines: Vec<&str> = self.content.lines().collect();
         let mut left_lines: Vec<SplitDiffLine> = Vec::new();
         let mut right_lines: Vec<SplitDiffLine> = Vec::new();
 
-        // If diff is empty or has no actual changes, show file content as context
-        let has_changes = diff.lines().any(|line| {
-            line.starts_with('+') && !line.starts_with("+++")
-                || line.starts_with('-') && !line.starts_with("---")
-        });
+        // Parse diff into hunks
+        struct Hunk {
+            new_start: usize,
+            lines: Vec<(char, String)>,
+        }
 
-        if !has_changes {
-            for (i, line) in self.content.lines().enumerate() {
+        let mut hunks: Vec<Hunk> = Vec::new();
+        let mut current_hunk: Option<Hunk> = None;
+
+        for line in diff.lines() {
+            if line.starts_with("@@") {
+                if let Some(hunk) = current_hunk.take() {
+                    hunks.push(hunk);
+                }
+                if let Some((_, new_start)) = Self::parse_hunk_header(line) {
+                    current_hunk = Some(Hunk {
+                        new_start,
+                        lines: Vec::new(),
+                    });
+                }
+            } else if line.starts_with("---")
+                || line.starts_with("+++")
+                || line.starts_with("diff ")
+            {
+                // Skip diff metadata
+            } else if let Some(ref mut hunk) = current_hunk {
+                if let Some(stripped) = line.strip_prefix('+') {
+                    hunk.lines.push(('+', stripped.to_string()));
+                } else if let Some(stripped) = line.strip_prefix('-') {
+                    hunk.lines.push(('-', stripped.to_string()));
+                } else if line.starts_with(' ') {
+                    hunk.lines.push((' ', line[1..].to_string()));
+                } else if line.is_empty() {
+                    hunk.lines.push((' ', String::new()));
+                }
+            }
+        }
+        if let Some(hunk) = current_hunk.take() {
+            hunks.push(hunk);
+        }
+
+        if hunks.is_empty() {
+            for (i, line) in content_lines.iter().enumerate() {
                 let line_num = i + 1;
                 let parsed = SplitDiffLine {
                     old_line_num: Some(line_num),
@@ -569,66 +607,105 @@ impl FileView {
             return (left_lines, right_lines);
         }
 
-        let mut old_line_num = 1usize;
-        let mut new_line_num = 1usize;
+        let mut new_cursor = 1usize;
+        let mut old_cursor = 1usize;
 
-        for line in diff.lines() {
-            if line.starts_with("@@") {
-                // Parse hunk header to update line numbers, but don't display it
-                if let Some((old_start, new_start)) = Self::parse_hunk_header(line) {
-                    old_line_num = old_start;
-                    new_line_num = new_start;
-                }
-            } else if line.starts_with("---")
-                || line.starts_with("+++")
-                || line.starts_with("diff ")
-            {
-                // Skip diff metadata headers
-            } else if let Some(stripped) = line.strip_prefix('+') {
+        for hunk in &hunks {
+            // Fill context lines before this hunk from file content
+            while new_cursor < hunk.new_start {
+                let content = content_lines
+                    .get(new_cursor - 1)
+                    .unwrap_or(&"")
+                    .to_string();
                 left_lines.push(SplitDiffLine {
-                    old_line_num: None,
+                    old_line_num: Some(old_cursor),
                     new_line_num: None,
-                    content: String::new(),
-                    line_type: DiffLineType::Added,
-                });
-                right_lines.push(SplitDiffLine {
-                    old_line_num: None,
-                    new_line_num: Some(new_line_num),
-                    content: stripped.to_string(),
-                    line_type: DiffLineType::Added,
-                });
-                new_line_num += 1;
-            } else if let Some(stripped) = line.strip_prefix('-') {
-                left_lines.push(SplitDiffLine {
-                    old_line_num: Some(old_line_num),
-                    new_line_num: None,
-                    content: stripped.to_string(),
-                    line_type: DiffLineType::Removed,
-                });
-                right_lines.push(SplitDiffLine {
-                    old_line_num: None,
-                    new_line_num: None,
-                    content: String::new(),
-                    line_type: DiffLineType::Removed,
-                });
-                old_line_num += 1;
-            } else if line.starts_with(' ') || line.is_empty() {
-                let content = if line.is_empty() { "" } else { &line[1..] };
-                left_lines.push(SplitDiffLine {
-                    old_line_num: Some(old_line_num),
-                    new_line_num: None,
-                    content: content.to_string(),
+                    content: content.clone(),
                     line_type: DiffLineType::Context,
                 });
                 right_lines.push(SplitDiffLine {
                     old_line_num: None,
-                    new_line_num: Some(new_line_num),
-                    content: content.to_string(),
+                    new_line_num: Some(new_cursor),
+                    content,
                     line_type: DiffLineType::Context,
                 });
-                old_line_num += 1;
-                new_line_num += 1;
+                new_cursor += 1;
+                old_cursor += 1;
             }
+
+            // Process hunk lines
+            for (type_char, content) in &hunk.lines {
+                match type_char {
+                    '+' => {
+                        left_lines.push(SplitDiffLine {
+                            old_line_num: None,
+                            new_line_num: None,
+                            content: String::new(),
+                            line_type: DiffLineType::Added,
+                        });
+                        right_lines.push(SplitDiffLine {
+                            old_line_num: None,
+                            new_line_num: Some(new_cursor),
+                            content: content.clone(),
+                            line_type: DiffLineType::Added,
+                        });
+                        new_cursor += 1;
+                    }
+                    '-' => {
+                        left_lines.push(SplitDiffLine {
+                            old_line_num: Some(old_cursor),
+                            new_line_num: None,
+                            content: content.clone(),
+                            line_type: DiffLineType::Removed,
+                        });
+                        right_lines.push(SplitDiffLine {
+                            old_line_num: None,
+                            new_line_num: None,
+                            content: String::new(),
+                            line_type: DiffLineType::Removed,
+                        });
+                        old_cursor += 1;
+                    }
+                    _ => {
+                        left_lines.push(SplitDiffLine {
+                            old_line_num: Some(old_cursor),
+                            new_line_num: None,
+                            content: content.clone(),
+                            line_type: DiffLineType::Context,
+                        });
+                        right_lines.push(SplitDiffLine {
+                            old_line_num: None,
+                            new_line_num: Some(new_cursor),
+                            content: content.clone(),
+                            line_type: DiffLineType::Context,
+                        });
+                        new_cursor += 1;
+                        old_cursor += 1;
+                    }
+                }
+            }
+        }
+
+        // Fill context lines after the last hunk
+        while new_cursor <= content_lines.len() {
+            let content = content_lines
+                .get(new_cursor - 1)
+                .unwrap_or(&"")
+                .to_string();
+            left_lines.push(SplitDiffLine {
+                old_line_num: Some(old_cursor),
+                new_line_num: None,
+                content: content.clone(),
+                line_type: DiffLineType::Context,
+            });
+            right_lines.push(SplitDiffLine {
+                old_line_num: None,
+                new_line_num: Some(new_cursor),
+                content,
+                line_type: DiffLineType::Context,
+            });
+            new_cursor += 1;
+            old_cursor += 1;
         }
 
         (left_lines, right_lines)
@@ -976,239 +1053,102 @@ impl FileView {
 
     fn render_inline_diff(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let lines = self.cached_inline_lines.clone();
-        let file_path = self.file_path.clone();
-        let highlight_new = self.highlight_new.as_deref();
-        let highlight_old = self.highlight_old.as_deref();
-        let selected_range = self
-            .selected_line_range()
-            .filter(|(start, end)| start != end);
-        let section = self.current_change_section;
-        let hovered_hunk_idx = self.hovered_line.and_then(|h| self.hunk_idx_for_line(h));
 
         if let Some(target) = self.target_line.take() {
             if let Some(ix) = lines.iter().position(|l| l.line_num == Some(target)) {
-                self.inline_scroll_handle.scroll_to_top_of_item(ix);
+                self.inline_scroll_handle
+                    .scroll_to_item(ix, ScrollStrategy::Top);
             }
         }
 
-        div()
-            .id("inline-diff-scroll")
-            .flex_1()
-            .overflow_scroll()
-            .track_scroll(&self.inline_scroll_handle)
-            .bg(rgb(BG_BASE))
-            .flex()
-            .flex_col()
-            .font_family(MONOSPACE_FONT)
-            .text_sm()
-            .line_height(px(20.0))
-            .p_2()
-            .children(lines.iter().enumerate().map(|(idx, line)| {
-                let (bg_color, text_color, opacity) = match line.change_type {
-                    InlineChangeType::Added => (Some(rgb(DIFF_ADDED_BG)), rgb(GREEN), 1.0),
-                    InlineChangeType::Deleted => (Some(rgb(DIFF_REMOVED_BG)), rgb(RED), 0.6),
-                    InlineChangeType::Unchanged => (None, rgb(TEXT), 1.0),
-                };
+        let item_count = lines.len();
 
-                let line_num_str = line.line_num.map(|n| n.to_string()).unwrap_or_default();
+        uniform_list(
+            "inline-diff-scroll",
+            item_count,
+            cx.processor(|this: &mut Self, range: Range<usize>, _window: &mut Window, cx: &mut Context<Self>| {
+                let lines = &this.cached_inline_lines;
+                let highlight_new = this.highlight_new.as_deref();
+                let highlight_old = this.highlight_old.as_deref();
 
-                let prefix = match line.change_type {
-                    InlineChangeType::Added => "+",
-                    InlineChangeType::Deleted => "-",
-                    InlineChangeType::Unchanged => " ",
-                };
-
-                let path_for_click = file_path.clone();
-                let line_num_for_click = line.line_num;
-                let is_selected_line = line_num_for_click.is_some_and(|n| self.is_line_selected(n));
-                let line_hunk_idx = line_num_for_click.and_then(|n| self.hunk_idx_for_line(n));
-                let is_hovered_hunk = line_hunk_idx
-                    .zip(hovered_hunk_idx)
-                    .is_some_and(|(a, b)| a == b);
-                let is_staged_section = matches!(section, Some(ChangeSection::Staged));
-                let is_unstaged_section = matches!(section, Some(ChangeSection::Unstaged));
-                let stage_line = line_num_for_click.unwrap_or(1);
-                // Untracked (Added) files use a synthetic diff; git diff is empty so hunk
-                // staging would silently fail — hide the hunk buttons for those files.
-                let is_untracked = matches!(self.current_change_type, Some(ChangeType::Added))
-                    && is_unstaged_section;
-                let can_show_stage =
-                    is_hovered_hunk && line_num_for_click.is_some() && !is_untracked;
-                let can_show_discard = is_hovered_hunk
-                    && is_unstaged_section
-                    && line_num_for_click.is_some()
-                    && !is_untracked;
-                let stage_symbol = if is_staged_section { "-" } else { "+" };
-                let gutter_strip_color = match line.change_type {
-                    InlineChangeType::Added => rgb(GREEN),
-                    InlineChangeType::Deleted => rgb(RED),
-                    InlineChangeType::Unchanged => rgb(BG_MANTLE),
-                };
-
-                div()
-                    .flex()
-                    .whitespace_nowrap()
-                    .when_some(bg_color, |el, color| el.bg(color))
-                    .when(is_selected_line, |el| el.bg(rgb(BG_SURFACE2)))
-                    .opacity(opacity)
-                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
-                        if this.hovered_line != line_num_for_click {
-                            this.hovered_line = line_num_for_click;
-                            cx.notify();
-                        }
-                    }))
-                    .child(
-                        div()
-                            .w(px(3.0))
-                            .h_full()
-                            .flex_shrink_0()
-                            .bg(gutter_strip_color),
-                    )
-                    .child(
-                        div()
-                            .id(("inline-diff-line", idx))
-                            .w(px(40.0))
-                            .flex_shrink_0()
-                            .text_right()
-                            .pr_2()
-                            .bg(if is_selected_line {
-                                rgb(BG_SURFACE2)
-                            } else {
-                                rgb(BG_MANTLE)
-                            })
-                            .text_color(if is_selected_line {
-                                rgb(TEXT)
-                            } else {
-                                rgb(TEXT_MUTED)
-                            })
-                            .when(line_num_for_click.is_some(), |el| {
-                                el.cursor_pointer().hover(|el| el.text_color(rgb(BLUE)))
-                            })
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                    if let Some(num) = line_num_for_click {
-                                        this.select_diff_line(num, event.modifiers.shift);
-                                        cx.notify();
-                                    }
-                                }),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |_this, _, _, cx| {
-                                    if let (Some(path), Some(num)) =
-                                        (&path_for_click, line_num_for_click)
-                                    {
-                                        let text = format!("`{}:{}`", path.to_string_lossy(), num);
-                                        cx.emit(SendToTerminalEvent(text));
-                                    }
-                                }),
-                            )
-                            .child(line_num_str),
-                    )
-                    .child(
-                        div()
-                            .id(("inline-stage-hunk", idx))
-                            .w(px(16.0))
-                            .flex_shrink_0()
-                            .text_center()
-                            .text_xs()
-                            .text_color(if is_staged_section {
-                                rgb(BLUE)
-                            } else {
-                                rgb(GREEN)
-                            })
-                            .when(can_show_stage, |el| {
-                                el.cursor_pointer()
-                                    .hover(|d| d.bg(rgb(BG_SURFACE1)))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some((start, end)) = selected_range {
-                                            if is_staged_section {
-                                                this.request_unstage_range(start, end, cx);
-                                            } else {
-                                                this.request_stage_range(start, end, cx);
-                                            }
-                                        } else if is_staged_section {
-                                            this.request_unstage_hunk(stage_line, cx);
-                                        } else {
-                                            this.request_stage_hunk(stage_line, cx);
-                                        }
-                                    }))
-                            })
-                            .child(if can_show_stage { stage_symbol } else { " " }),
-                    )
-                    .child(
-                        div()
-                            .id(("inline-discard-hunk", idx))
-                            .w(px(16.0))
-                            .flex_shrink_0()
-                            .text_center()
-                            .text_xs()
-                            .text_color(rgb(RED))
-                            .when(can_show_discard, |el| {
-                                el.cursor_pointer()
-                                    .hover(|d| d.bg(rgb(BG_SURFACE1)))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some((start, end)) = selected_range {
-                                            this.request_discard_range(start, end, cx);
-                                        } else {
-                                            this.request_discard_hunk(stage_line, cx);
-                                        }
-                                    }))
-                            })
-                            .child(if can_show_discard { "x" } else { " " }),
-                    )
-                    .child(
-                        div()
-                            .w(px(16.0))
-                            .flex_shrink_0()
-                            .text_center()
-                            .text_color(text_color)
-                            .child(prefix),
-                    )
-                    .child({
-                        let highlight_line = match line.change_type {
+                range
+                    .map(|idx| {
+                        let line = &lines[idx];
+                        let (bg_color, text_color, opacity) = match line.change_type {
+                            InlineChangeType::Added => {
+                                (Some(rgb(DIFF_ADDED_BG)), rgb(GREEN), 1.0)
+                            }
                             InlineChangeType::Deleted => {
-                                Self::highlighted_line_for_number(highlight_old, line.old_line_num)
+                                (Some(rgb(DIFF_REMOVED_BG)), rgb(RED), 0.6)
                             }
-                            InlineChangeType::Added | InlineChangeType::Unchanged => {
-                                Self::highlighted_line_for_number(highlight_new, line.line_num)
-                            }
+                            InlineChangeType::Unchanged => (None, rgb(TEXT), 1.0),
+                        };
+                        let prefix = match line.change_type {
+                            InlineChangeType::Added => "+",
+                            InlineChangeType::Deleted => "-",
+                            InlineChangeType::Unchanged => " ",
+                        };
+                        let gutter_strip_color = match line.change_type {
+                            InlineChangeType::Added => rgb(GREEN),
+                            InlineChangeType::Deleted => rgb(RED),
+                            InlineChangeType::Unchanged => rgb(BG_MANTLE),
                         };
 
-                        if let Some(highlighted_line) = highlight_line {
+                        // Build content element before calling build_diff_row
+                        // (each borrows cx sequentially, not simultaneously)
+                        let highlight_line = match line.change_type {
+                            InlineChangeType::Deleted => {
+                                Self::highlighted_line_for_number(
+                                    highlight_old,
+                                    line.old_line_num,
+                                )
+                            }
+                            _ => {
+                                Self::highlighted_line_for_number(
+                                    highlight_new,
+                                    line.line_num,
+                                )
+                            }
+                        };
+                        let content = if let Some(hl) = highlight_line {
                             if line.change_type == InlineChangeType::Deleted {
-                                // Deleted lines no longer exist in the working tree;
-                                // show highlighting but disable click-to-definition.
                                 div().flex_1().pl_2().text_color(text_color).child(
                                     Self::styled_text_from_highlighted_line(
-                                        &line.content,
-                                        highlighted_line,
+                                        &line.content, hl,
                                     ),
                                 )
                             } else {
-                                let text_line_num = line.line_num.unwrap_or(0);
+                                let ln = line.line_num.unwrap_or(0);
                                 div().flex_1().pl_2().text_color(text_color).child(
-                                    self.render_interactive_text(
-                                        text_line_num,
-                                        &line.content,
-                                        highlighted_line,
-                                        "inline-diff-text",
-                                        cx,
+                                    this.render_interactive_text(
+                                        ln, &line.content, hl, "inline-diff", cx,
                                     ),
                                 )
                             }
                         } else {
-                            div().flex_1().pl_2().text_color(text_color).child(
-                                if line.content.is_empty() {
-                                    " ".to_string()
-                                } else {
-                                    line.content.clone()
-                                },
-                            )
-                        }
+                            let text = if line.content.is_empty() {
+                                " ".to_string()
+                            } else {
+                                line.content.clone()
+                            };
+                            div().flex_1().pl_2().text_color(text_color).child(text)
+                        };
+
+                        this.build_diff_row(
+                            idx, line.line_num, bg_color, text_color,
+                            gutter_strip_color, prefix, opacity, content, cx,
+                        )
                     })
-            }))
+                    .collect()
+            }),
+        )
+        .flex_1()
+        .bg(rgb(BG_BASE))
+        .font_family(MONOSPACE_FONT)
+        .text_sm()
+        .line_height(px(20.0))
+        .p_2()
+        .track_scroll(&self.inline_scroll_handle)
     }
 
     fn render_diff(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1218,22 +1158,19 @@ impl FileView {
                 .iter()
                 .position(|l| l.new_line_num == Some(line))
             {
-                self.diff_scroll_handle.scroll_to_top_of_item(ix);
+                self.diff_scroll_handle
+                    .scroll_to_item(ix, ScrollStrategy::Top);
             }
         }
 
-        let left_lines = self.cached_left_lines.clone();
-        let right_lines = self.cached_right_lines.clone();
-        let scroll_handle = self.diff_scroll_handle.clone();
         let ratio = self.diff_split_ratio;
-        let highlight_old = self.highlight_old.as_deref();
-        let highlight_new = self.highlight_new.as_deref();
+        let line_count = self.cached_left_lines.len();
 
         div()
             .id("diff-view")
             .flex_1()
             .flex()
-            .flex_row()
+            .flex_col()
             .overflow_hidden()
             .bg(rgb(BG_BASE))
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
@@ -1251,16 +1188,15 @@ impl FileView {
                     }
                 }),
             )
-            // Left column (header + content)
+            // Header row
             .child(
                 div()
-                    .w(DefiniteLength::Fraction(ratio))
-                    .min_w_0()
                     .flex()
-                    .flex_col()
-                    .overflow_hidden()
+                    .flex_row()
                     .child(
                         div()
+                            .w(DefiniteLength::Fraction(ratio))
+                            .min_w_0()
                             .h_6()
                             .flex_shrink_0()
                             .px_2()
@@ -1271,34 +1207,11 @@ impl FileView {
                             .text_color(rgb(RED))
                             .child("Before (HEAD)"),
                     )
+                    .child(self.render_diff_resize_handle(cx))
                     .child(
                         div()
-                            .id("diff-scroll-left")
                             .flex_1()
-                            .overflow_scroll()
-                            .track_scroll(&scroll_handle)
-                            .pl_2()
-                            .py_2()
-                            .font_family(MONOSPACE_FONT)
-                            .text_sm()
-                            .line_height(px(20.0))
-                            .children(left_lines.iter().map(|line| {
-                                Self::render_highlighted_diff_line(line, true, highlight_old)
-                            })),
-                    ),
-            )
-            // Single resize handle spanning full height (header + content)
-            .child(self.render_diff_resize_handle(cx))
-            // Right column (header + content)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .child(
-                        div()
+                            .min_w_0()
                             .h_6()
                             .flex_shrink_0()
                             .px_2()
@@ -1308,24 +1221,76 @@ impl FileView {
                             .text_xs()
                             .text_color(rgb(GREEN))
                             .child("After (Working)"),
-                    )
-                    .child(
-                        div()
-                            .id("diff-scroll-right")
-                            .flex_1()
-                            .overflow_scroll()
-                            .track_scroll(&scroll_handle)
-                            .pr_2()
-                            .py_2()
-                            .font_family(MONOSPACE_FONT)
-                            .text_sm()
-                            .line_height(px(20.0))
-                            .children(
-                                right_lines.iter().map(|line| {
-                                    self.render_diff_line_right(line, highlight_new, cx)
-                                }),
-                            ),
                     ),
+            )
+            // Scrollable content with virtual scrolling
+            .child(
+                uniform_list(
+                    "diff-scroll",
+                    line_count,
+                    cx.processor(
+                        |this: &mut Self,
+                         range: Range<usize>,
+                         _window: &mut Window,
+                         cx: &mut Context<Self>| {
+                            let ratio = this.diff_split_ratio;
+                            let highlight_old = this.highlight_old.as_deref();
+                            let highlight_new = this.highlight_new.as_deref();
+
+                            range
+                                .map(|idx| {
+                                    let left_line = &this.cached_left_lines[idx];
+                                    let right_line = &this.cached_right_lines[idx];
+
+                                    div()
+                                        .w_full()
+                                        .h(px(20.0))
+                                        .relative()
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .left_0()
+                                                .top_0()
+                                                .bottom_0()
+                                                .w(DefiniteLength::Fraction(ratio))
+                                                .overflow_hidden()
+                                                .pl_2()
+                                                .child(
+                                                    Self::render_highlighted_diff_line(
+                                                        left_line,
+                                                        true,
+                                                        highlight_old,
+                                                    ),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .bottom_0()
+                                                .right_0()
+                                                .w(DefiniteLength::Fraction(1.0 - ratio))
+                                                .overflow_hidden()
+                                                .pr_2()
+                                                .child(
+                                                    this.render_diff_line_right(
+                                                        idx,
+                                                        right_line,
+                                                        highlight_new,
+                                                        cx,
+                                                    ),
+                                                ),
+                                        )
+                                })
+                                .collect()
+                        },
+                    ),
+                )
+                .flex_1()
+                .font_family(MONOSPACE_FONT)
+                .text_sm()
+                .line_height(px(20.0))
+                .track_scroll(&self.diff_scroll_handle),
             )
     }
 
@@ -1359,6 +1324,11 @@ impl FileView {
         };
         let highlighted_line = Self::highlighted_line_for_number(highlight_doc, line_num);
 
+        let prefix = match line.line_type {
+            DiffLineType::Removed => "-",
+            _ => " ",
+        };
+
         div()
             .flex()
             .flex_row()
@@ -1374,6 +1344,17 @@ impl FileView {
                     .bg(rgb(BG_MANTLE))
                     .text_color(rgb(TEXT_MUTED))
                     .child(line_num.map(|n| n.to_string()).unwrap_or_default()),
+            )
+            // Spacers matching right side's stage/discard/prefix columns (16px × 3)
+            .child(div().w(px(16.0)).flex_shrink_0())
+            .child(div().w(px(16.0)).flex_shrink_0())
+            .child(
+                div()
+                    .w(px(16.0))
+                    .flex_shrink_0()
+                    .text_center()
+                    .text_color(text_color)
+                    .child(prefix),
             )
             .child(if let Some(highlighted_line) = highlighted_line {
                 div()
@@ -1395,29 +1376,30 @@ impl FileView {
             })
     }
 
-    /// Render a right-side (After/Working) diff line with InteractiveText for go-to-definition.
-    fn render_diff_line_right(
+    /// Build an interactive diff row with gutter strip, line number, stage/discard buttons,
+    /// prefix symbol, and caller-provided content element.
+    /// Used by both inline diff and split diff (right side) to avoid duplicating ~120 lines.
+    fn build_diff_row(
         &self,
-        line: &SplitDiffLine,
-        highlight_doc: Option<&HighlightedDoc>,
+        idx: usize,
+        line_num: Option<usize>,
+        bg_color: Option<gpui::Rgba>,
+        text_color: gpui::Rgba,
+        gutter_strip_color: gpui::Rgba,
+        prefix: &'static str,
+        opacity: f32,
+        content: impl IntoElement,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (bg_color, text_color) = match line.line_type {
-            DiffLineType::Added => (Some(rgb(DIFF_ADDED_BG)), rgb(GREEN)),
-            DiffLineType::Removed => (Some(rgb(DIFF_REMOVED_BG)), rgb(RED)),
-            DiffLineType::Context => (None, rgb(TEXT)),
-        };
-
-        let line_num = line.new_line_num;
+    ) -> gpui::Div {
         let is_selected_line = line_num.is_some_and(|n| self.is_line_selected(n));
-        let selected_range = self
-            .selected_line_range()
-            .filter(|(start, end)| start != end);
         let hovered_hunk_idx = self.hovered_line.and_then(|h| self.hunk_idx_for_line(h));
         let line_hunk_idx = line_num.and_then(|n| self.hunk_idx_for_line(n));
         let is_hovered_hunk = line_hunk_idx
             .zip(hovered_hunk_idx)
             .is_some_and(|(a, b)| a == b);
+        let selected_range = self
+            .selected_line_range()
+            .filter(|(start, end)| start != end);
         let is_staged_section = matches!(self.current_change_section, Some(ChangeSection::Staged));
         let is_unstaged_section =
             matches!(self.current_change_section, Some(ChangeSection::Unstaged));
@@ -1428,29 +1410,14 @@ impl FileView {
         let can_show_discard =
             is_hovered_hunk && is_unstaged_section && line_num.is_some() && !is_untracked;
         let stage_symbol = if is_staged_section { "-" } else { "+" };
-        let prefix = match line.line_type {
-            DiffLineType::Added => "+",
-            DiffLineType::Removed => "-",
-            DiffLineType::Context => " ",
-        };
-        let gutter_strip_color = match line.line_type {
-            DiffLineType::Added => rgb(GREEN),
-            DiffLineType::Removed => rgb(RED),
-            DiffLineType::Context => rgb(BG_MANTLE),
-        };
-        let content = if line.content.is_empty() {
-            " ".to_string()
-        } else {
-            line.content.clone()
-        };
-        let highlighted_line = Self::highlighted_line_for_number(highlight_doc, line_num);
+        let path_for_click = self.file_path.clone();
 
         div()
             .flex()
-            .flex_row()
             .whitespace_nowrap()
             .when_some(bg_color, |el, color| el.bg(color))
             .when(is_selected_line, |el| el.bg(rgb(BG_SURFACE2)))
+            .opacity(opacity)
             .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
                 if this.hovered_line != line_num {
                     this.hovered_line = line_num;
@@ -1466,6 +1433,7 @@ impl FileView {
             )
             .child(
                 div()
+                    .id(("diff-line", idx))
                     .w(px(40.0))
                     .flex_shrink_0()
                     .text_right()
@@ -1481,14 +1449,27 @@ impl FileView {
                         rgb(TEXT_MUTED)
                     })
                     .when(line_num.is_some(), |el| {
-                        el.cursor_pointer().hover(|el| el.text_color(rgb(BLUE)))
+                        el.cursor_pointer()
+                            .hover(|el| el.text_color(rgb(BLUE)))
                     })
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                            if let Some(num) = line_num {
-                                this.select_diff_line(num, event.modifiers.shift);
-                                cx.notify();
+                        cx.listener(
+                            move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                if let Some(num) = line_num {
+                                    this.select_diff_line(num, event.modifiers.shift);
+                                    cx.notify();
+                                }
+                            },
+                        ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |_this, _, _, cx| {
+                            if let (Some(path), Some(num)) = (&path_for_click, line_num) {
+                                let text =
+                                    format!("`{}:{}`", path.to_string_lossy(), num);
+                                cx.emit(SendToTerminalEvent(text));
                             }
                         }),
                     )
@@ -1496,7 +1477,7 @@ impl FileView {
             )
             .child(
                 div()
-                    .id(("split-stage-hunk", line_num.unwrap_or(0)))
+                    .id(("diff-stage", idx))
                     .w(px(16.0))
                     .flex_shrink_0()
                     .text_center()
@@ -1527,7 +1508,7 @@ impl FileView {
             )
             .child(
                 div()
-                    .id(("split-discard-hunk", line_num.unwrap_or(0)))
+                    .id(("diff-discard", idx))
                     .w(px(16.0))
                     .flex_shrink_0()
                     .text_center()
@@ -1554,40 +1535,69 @@ impl FileView {
                     .text_color(text_color)
                     .child(prefix),
             )
-            .child(
-                if let (Some(highlighted_line), Some(ln)) = (highlighted_line, line_num) {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .pl_2()
-                        .text_color(text_color)
-                        .child(self.render_interactive_text(
-                            ln,
-                            &content,
-                            highlighted_line,
-                            "diff-right-text",
-                            cx,
-                        ))
-                } else if let Some(highlighted_line) = highlighted_line {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .pl_2()
-                        .text_color(text_color)
-                        .child(Self::styled_text_from_highlighted_line(
-                            &content,
-                            highlighted_line,
-                        ))
-                } else {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .pl_2()
-                        .text_color(text_color)
-                        .child(content)
-                },
-            )
-            .into_any_element()
+            .child(content)
+    }
+
+    /// Render a right-side (After/Working) diff line with InteractiveText for go-to-definition.
+    fn render_diff_line_right(
+        &self,
+        idx: usize,
+        line: &SplitDiffLine,
+        highlight_doc: Option<&HighlightedDoc>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (bg_color, text_color) = match line.line_type {
+            DiffLineType::Added => (Some(rgb(DIFF_ADDED_BG)), rgb(GREEN)),
+            DiffLineType::Removed => (Some(rgb(DIFF_REMOVED_BG)), rgb(RED)),
+            DiffLineType::Context => (None, rgb(TEXT)),
+        };
+        let gutter_strip_color = match line.line_type {
+            DiffLineType::Added => rgb(GREEN),
+            DiffLineType::Removed => rgb(RED),
+            DiffLineType::Context => rgb(BG_MANTLE),
+        };
+        let prefix = match line.line_type {
+            DiffLineType::Added => "+",
+            DiffLineType::Removed => "-",
+            DiffLineType::Context => " ",
+        };
+        let line_num = line.new_line_num;
+        let content = if line.content.is_empty() {
+            " ".to_string()
+        } else {
+            line.content.clone()
+        };
+        let highlighted_line = Self::highlighted_line_for_number(highlight_doc, line_num);
+
+        let content_element =
+            if let (Some(hl), Some(ln)) = (highlighted_line, line_num) {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_2()
+                    .text_color(text_color)
+                    .child(self.render_interactive_text(ln, &content, hl, "diff-right", cx))
+            } else if let Some(hl) = highlighted_line {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_2()
+                    .text_color(text_color)
+                    .child(Self::styled_text_from_highlighted_line(&content, hl))
+            } else {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_2()
+                    .text_color(text_color)
+                    .child(content)
+            };
+
+        self.build_diff_row(
+            idx, line_num, bg_color, text_color, gutter_strip_color, prefix, 1.0,
+            content_element, cx,
+        )
+        .into_any_element()
     }
 
     fn render_diff_resize_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {

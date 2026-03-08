@@ -9,7 +9,8 @@ use gpui::{
     App, ClipboardItem, Context, KeyBinding, KeyDownEvent, KeyUpEvent, KeybindingKeystroke,
     Keystroke, ModifiersChangedEvent, Window, actions,
 };
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 // Typeless-like synthetic Ctrl+C tends to press+release within a few ms.
@@ -272,7 +273,7 @@ impl TerminalView {
         &mut self,
         event: &ModifiersChangedEvent,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         Self::trace_input_event(format!(
             "modifiers c={} a={} s={} p={} f={} pending={:?}",
@@ -289,6 +290,21 @@ impl TerminalView {
                 .is_some_and(|pending| !pending.rapid_tap_detected && !pending.ctrl_c_released)
         {
             self.flush_pending_ctrl_c("ctrl_released");
+        }
+
+        let was_ctrl = self.ctrl_held;
+        self.ctrl_held = event.modifiers.control;
+        if !was_ctrl && self.ctrl_held {
+            // Ctrl just pressed: scan for URLs so Ctrl+hover works immediately.
+            self.detect_urls_from_cache();
+        } else if was_ctrl && !self.ctrl_held {
+            // Ctrl released: discard URL state to free memory.
+            self.detected_urls.clear();
+            self.url_cells = Arc::new(HashMap::new());
+            if self.hovered_url_index.is_some() {
+                self.hovered_url_index = None;
+                cx.notify();
+            }
         }
     }
 

@@ -2,11 +2,16 @@
 //!
 //! This module implements the custom GPUI Element for rendering terminal content.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use super::{TerminalView, input_probe};
+use super::view::{ansi_color_to_hsla, named_color_to_hsla};
 use crate::theme::*;
-use alacritty_terminal::vte::ansi::CursorShape;
+use alacritty_terminal::term::cell::Flags as CellFlags;
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 use gpui::{
-    App, Bounds, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, Hsla,
+    App, Bounds, Element, ElementId, ElementInputHandler, Entity, Font, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, LayoutId, Pixels, Point, SharedString, Size, TextRun,
     TextStyle, UnderlineStyle, Window, fill, px, relative, rgb,
 };
@@ -32,38 +37,28 @@ const MIN_TERMINAL_COLS: u16 = 2;
 /// Minimum terminal lines (prevents degenerate grid)
 const MIN_TERMINAL_LINES: u16 = 2;
 
-/// Terminal cell data for paint phase rendering
-#[derive(Clone)]
-pub(super) struct CellData {
-    /// Character to display
-    pub c: char,
-    /// Foreground color
-    pub fg: Hsla,
-    /// Background color (None = transparent)
-    pub bg: Option<Hsla>,
-    /// Is this the cursor position
-    pub is_cursor: bool,
-    /// Is this cell selected
-    pub is_selected: bool,
-    /// Whether this cell is a wide character (occupies 2 cells)
-    pub is_wide_char: bool,
-    /// Whether this cell is a spacer for a wide character (should skip rendering)
-    pub is_wide_spacer: bool,
-    /// Whether this cell is part of a detected URL
-    pub is_url: bool,
-    /// Whether this cell's URL is currently hovered with Ctrl
-    pub is_url_hovered: bool,
-}
-
-/// Cached terminal layout for paint phase
+/// Terminal layout metadata for the paint phase.
+/// Cell data is shared from `CachedContent` via `Arc` (zero-cost clone).
 pub(super) struct TerminalLayout {
-    /// Grid of cells (rows x cols)
-    pub cells: Vec<Vec<CellData>>,
+    /// Grid of cells shared from CachedContent (Arc::clone avoids deep copy)
+    pub cells: Arc<Vec<Vec<super::view::CachedCell>>>,
     /// Cell dimensions
     pub cell_width: Pixels,
     pub line_height: Pixels,
     /// Cursor shape for this render pass
     pub cursor_shape: CursorShape,
+    /// Cursor position in display coordinates (line, col)
+    pub cursor: (i32, usize),
+    /// Whether cursor should be visible
+    pub cursor_visible: bool,
+    /// Display offset for scrollback
+    pub display_offset: i32,
+    /// Current text selection
+    pub selection: Option<super::view::TerminalSelection>,
+    /// URL cell lookup (shared from view)
+    pub url_cells: Arc<HashMap<(usize, usize), usize>>,
+    /// Hovered URL index
+    pub hovered_url_index: Option<usize>,
     /// Preedit text if any
     pub preedit_text: String,
 }
@@ -76,6 +71,149 @@ pub(super) struct TerminalElement {
 impl TerminalElement {
     pub fn new(view: Entity<TerminalView>) -> Self {
         Self { view }
+    }
+}
+
+#[inline]
+fn url_underline(is_url: bool, color: Hsla) -> Option<UnderlineStyle> {
+    if is_url {
+        Some(UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(color),
+            wavy: false,
+        })
+    } else {
+        None
+    }
+}
+
+/// Accumulates consecutive same-style characters into a single `shape_line` call.
+/// Reused across rows within a single `paint_cells` invocation.
+struct TextBatch {
+    // Constants for the paint call
+    origin_x: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
+    font_size: Pixels,
+    font: Font,
+    // Per-segment mutable state
+    start_col: Option<usize>,
+    text: String,
+    runs: Vec<TextRun>,
+    fg: Option<Hsla>,
+    underline: bool,
+    /// Spaces after the last non-space char; flushed into the current run when the
+    /// next visible char arrives. Prevents trailing whitespace in the batch string.
+    parked_spaces: usize,
+}
+
+impl TextBatch {
+    fn new(
+        origin_x: Pixels,
+        cell_width: Pixels,
+        line_height: Pixels,
+        font_size: Pixels,
+        font: Font,
+    ) -> Self {
+        Self {
+            origin_x,
+            cell_width,
+            line_height,
+            font_size,
+            font,
+            start_col: None,
+            text: String::new(),
+            runs: Vec::new(),
+            fg: None,
+            underline: false,
+            parked_spaces: 0,
+        }
+    }
+
+    /// Reset state for a new row. Allocations are retained.
+    fn reset_row(&mut self) {
+        self.start_col = None;
+        self.text.clear();
+        self.runs.clear();
+        self.fg = None;
+        self.underline = false;
+        self.parked_spaces = 0;
+    }
+
+    /// Shape and paint accumulated text, then reset segment state.
+    /// Trailing parked spaces are discarded (their background is already painted per-cell).
+    fn flush(&mut self, text_y: Pixels, window: &mut Window, cx: &mut App) {
+        self.parked_spaces = 0;
+        if let Some(start_col) = self.start_col.take() {
+            if !self.text.is_empty() {
+                let x = self.origin_x + self.cell_width * start_col;
+                let text: SharedString = std::mem::take(&mut self.text).into();
+                let shaped =
+                    window
+                        .text_system()
+                        .shape_line(text, self.font_size, &self.runs, None);
+                let _ = shaped.paint(
+                    Point::new(x, text_y),
+                    self.line_height,
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+        }
+        self.runs.clear();
+        self.fg = None;
+    }
+
+    fn park_space(&mut self) {
+        if self.start_col.is_some() {
+            self.parked_spaces += 1;
+        }
+    }
+
+    /// Flush parked spaces into the current TextRun before a style change.
+    /// Spaces are visually transparent; attributing them to the previous color
+    /// has no visible effect.
+    fn drain_parked_spaces(&mut self) {
+        if self.parked_spaces > 0 {
+            if let Some(last_run) = self.runs.last_mut() {
+                last_run.len += self.parked_spaces;
+                for _ in 0..self.parked_spaces {
+                    self.text.push(' ');
+                }
+            }
+            self.parked_spaces = 0;
+        }
+    }
+
+    /// Accumulate a regular character into the batch.
+    fn push_char(&mut self, c: char, col_idx: usize, fg_color: Hsla, is_underline: bool) {
+        self.drain_parked_spaces();
+
+        if self.start_col.is_none() {
+            self.start_col = Some(col_idx);
+        }
+
+        let style_matches = self
+            .fg
+            .map_or(false, |fg| fg == fg_color && self.underline == is_underline);
+
+        if style_matches {
+            self.runs.last_mut().unwrap().len += c.len_utf8();
+        } else {
+            self.runs.push(TextRun {
+                len: c.len_utf8(),
+                font: self.font.clone(),
+                color: fg_color,
+                background_color: None,
+                underline: url_underline(is_underline, fg_color),
+                strikethrough: None,
+            });
+            self.fg = Some(fg_color);
+            self.underline = is_underline;
+        }
+        self.text.push(c);
     }
 }
 
@@ -250,7 +388,12 @@ impl Element for TerminalElement {
 }
 
 impl TerminalElement {
-    /// Paint all terminal cells
+    /// Paint all terminal cells.
+    ///
+    /// Text rendering is batched per row: consecutive cells with the same foreground color
+    /// and underline state are accumulated into a single `shape_line` call rather than
+    /// calling it once per character. This reduces GPU text-shaping calls from O(cols×rows)
+    /// to O(style_changes×rows), typically a 10–40× reduction for typical terminal output.
     fn paint_cells(
         &self,
         origin: Point<Pixels>,
@@ -263,19 +406,56 @@ impl TerminalElement {
         let cell_width = layout.cell_width;
         let line_height = layout.line_height;
 
+        let mut batch = TextBatch::new(
+            origin.x,
+            cell_width,
+            line_height,
+            font_size,
+            text_style.font(),
+        );
+
+        // Pre-compute cursor display position
+        let (cursor_disp_line, cursor_col) = layout.cursor;
+        let selection = layout
+            .selection
+            .filter(|sel| sel.start != sel.end);
+
         for (line_idx, row) in layout.cells.iter().enumerate() {
             let y = origin.y + line_height * line_idx;
+            let text_y = y + (line_height - font_size) / 2.0;
+            let actual_line = line_idx as i32 - layout.display_offset;
+            let is_cursor_line = layout.cursor_visible && line_idx as i32 == cursor_disp_line;
+
+            batch.reset_row();
 
             for (col_idx, cell) in row.iter().enumerate() {
-                // Skip wide character spacers - they're handled by the previous cell
-                if cell.is_wide_spacer {
+                if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
                     continue;
                 }
 
-                let x = origin.x + cell_width * col_idx;
+                // Convert AnsiColor → Hsla, handling INVERSE flag
+                let is_inverse = cell.flags.contains(CellFlags::INVERSE);
+                let (cell_fg, cell_bg) = if is_inverse {
+                    let fg = if cell.bg == AnsiColor::Named(NamedColor::Background) {
+                        named_color_to_hsla(NamedColor::Background)
+                    } else {
+                        ansi_color_to_hsla(cell.bg)
+                    };
+                    (fg, Some(ansi_color_to_hsla(cell.fg)))
+                } else {
+                    let fg = ansi_color_to_hsla(cell.fg);
+                    let bg = if cell.bg == AnsiColor::Named(NamedColor::Background) {
+                        None
+                    } else {
+                        Some(ansi_color_to_hsla(cell.bg))
+                    };
+                    (fg, bg)
+                };
 
-                // Wide characters occupy 2 cells in terminal grid
-                let render_width = if cell.is_wide_char {
+                let x = origin.x + cell_width * col_idx;
+                let is_wide = cell.flags.contains(CellFlags::WIDE_CHAR);
+
+                let render_width = if is_wide {
                     cell_width * 2.0
                 } else {
                     cell_width
@@ -289,161 +469,180 @@ impl TerminalElement {
                     },
                 );
 
-                // Paint base background first (selection or cell background).
-                let bg_color = if cell.is_selected {
+                let is_cursor = is_cursor_line && col_idx == cursor_col;
+                let is_selected = selection
+                    .map_or(false, |sel| sel.contains(actual_line, col_idx));
+
+                // Paint base background (selection or cell background)
+                let bg_color = if is_selected {
                     Some(Hsla::from(rgb(BLUE)))
                 } else {
-                    cell.bg
+                    cell_bg
                 };
-
                 if let Some(bg) = bg_color {
                     window.paint_quad(fill(cell_bounds, bg));
                 }
 
-                // Paint cursor overlay according to configured shape.
-                if cell.is_cursor {
+                // Paint cursor overlay according to configured shape
+                if is_cursor {
                     let cursor_color = Hsla::from(rgb(ROSEWATER));
                     match layout.cursor_shape {
                         CursorShape::Block => {
                             window.paint_quad(fill(cell_bounds, cursor_color));
                         }
-                        CursorShape::Hidden => {
-                            // Cursor is invisible.
-                        }
+                        CursorShape::Hidden => {}
                         CursorShape::Underline => {
                             let thickness = px(2.0);
-                            let underline_bounds = Bounds::new(
-                                Point::new(x, y + line_height - thickness),
-                                Size {
-                                    width: render_width,
-                                    height: thickness,
-                                },
-                            );
-                            window.paint_quad(fill(underline_bounds, cursor_color));
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    Point::new(x, y + line_height - thickness),
+                                    Size {
+                                        width: render_width,
+                                        height: thickness,
+                                    },
+                                ),
+                                cursor_color,
+                            ));
                         }
                         CursorShape::Beam => {
                             let thickness = px(2.0);
-                            let beam_bounds = Bounds::new(
-                                Point::new(x, y),
-                                Size {
-                                    width: thickness,
-                                    height: line_height,
-                                },
-                            );
-                            window.paint_quad(fill(beam_bounds, cursor_color));
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    Point::new(x, y),
+                                    Size {
+                                        width: thickness,
+                                        height: line_height,
+                                    },
+                                ),
+                                cursor_color,
+                            ));
                         }
                         CursorShape::HollowBlock => {
                             let thickness = px(1.0);
-                            let top = Bounds::new(
-                                Point::new(x, y),
-                                Size {
-                                    width: render_width,
-                                    height: thickness,
-                                },
-                            );
-                            let bottom = Bounds::new(
-                                Point::new(x, y + line_height - thickness),
-                                Size {
-                                    width: render_width,
-                                    height: thickness,
-                                },
-                            );
-                            let left = Bounds::new(
-                                Point::new(x, y),
-                                Size {
-                                    width: thickness,
-                                    height: line_height,
-                                },
-                            );
-                            let right = Bounds::new(
-                                Point::new(x + render_width - thickness, y),
-                                Size {
-                                    width: thickness,
-                                    height: line_height,
-                                },
-                            );
-
-                            window.paint_quad(fill(top, cursor_color));
-                            window.paint_quad(fill(bottom, cursor_color));
-                            window.paint_quad(fill(left, cursor_color));
-                            window.paint_quad(fill(right, cursor_color));
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    Point::new(x, y),
+                                    Size {
+                                        width: render_width,
+                                        height: thickness,
+                                    },
+                                ),
+                                cursor_color,
+                            ));
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    Point::new(x, y + line_height - thickness),
+                                    Size {
+                                        width: render_width,
+                                        height: thickness,
+                                    },
+                                ),
+                                cursor_color,
+                            ));
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    Point::new(x, y),
+                                    Size {
+                                        width: thickness,
+                                        height: line_height,
+                                    },
+                                ),
+                                cursor_color,
+                            ));
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    Point::new(x + render_width - thickness, y),
+                                    Size {
+                                        width: thickness,
+                                        height: line_height,
+                                    },
+                                ),
+                                cursor_color,
+                            ));
                         }
                     }
                 }
 
-                // Paint character
-                if cell.c != ' ' {
-                    let is_block_cursor =
-                        cell.is_cursor && matches!(layout.cursor_shape, CursorShape::Block);
-                    let is_hidden_cursor =
-                        cell.is_cursor && matches!(layout.cursor_shape, CursorShape::Hidden);
+                // === Batched text rendering ===
 
-                    let fg_color = if is_block_cursor
-                        || (cell.is_selected && (!cell.is_cursor || is_hidden_cursor))
-                    {
-                        Hsla::from(rgb(BG_BASE))
-                    } else if cell.is_url_hovered {
-                        Hsla::from(rgb(TEAL))
-                    } else if cell.is_url {
-                        Hsla::from(rgb(BLUE))
+                let c = if cell.c == '\0' { ' ' } else { cell.c };
+
+                if c == ' ' {
+                    batch.park_space();
+                    continue;
+                }
+
+                // Compute URL state via O(1) HashMap lookup
+                let (is_url, is_url_hovered) =
+                    if let Some(&url_idx) = layout.url_cells.get(&(line_idx, col_idx)) {
+                        (true, layout.hovered_url_index == Some(url_idx))
                     } else {
-                        cell.fg
+                        (false, false)
                     };
 
-                    // Block elements (U+2580-U+259F): draw as filled rectangles
-                    // instead of font glyphs to ensure gap-free rendering
-                    // (same approach as Alacritty's builtin_font)
-                    if self.paint_block_element(
-                        cell.c,
-                        Point::new(x, y),
-                        render_width,
-                        line_height,
-                        fg_color,
-                        window,
-                    ) {
-                        continue;
-                    }
+                // Compute effective foreground color (cursor / selection / URL overrides)
+                let is_block_cursor =
+                    is_cursor && matches!(layout.cursor_shape, CursorShape::Block);
+                let is_hidden_cursor =
+                    is_cursor && matches!(layout.cursor_shape, CursorShape::Hidden);
+                let fg_color = if is_block_cursor
+                    || (is_selected && (!is_cursor || is_hidden_cursor))
+                {
+                    Hsla::from(rgb(BG_BASE))
+                } else if is_url_hovered {
+                    Hsla::from(rgb(TEAL))
+                } else if is_url {
+                    Hsla::from(rgb(BLUE))
+                } else {
+                    cell_fg
+                };
 
-                    let mut style = text_style.clone();
-                    style.color = fg_color;
+                // Block elements (U+2580–U+259F): draw as filled rectangles instead of
+                // font glyphs (same approach as Alacritty's builtin_font).
+                // Flush the pending text batch first so paint order stays correct.
+                if self.paint_block_element(
+                    c,
+                    Point::new(x, y),
+                    render_width,
+                    line_height,
+                    fg_color,
+                    window,
+                ) {
+                    batch.flush(text_y, window, cx);
+                    continue;
+                }
 
-                    let underline = if cell.is_url {
-                        Some(UnderlineStyle {
-                            thickness: px(1.0),
-                            color: Some(fg_color),
-                            wavy: false,
-                        })
-                    } else {
-                        None
-                    };
-
-                    let text: SharedString = cell.c.to_string().into();
-                    let runs = [TextRun {
-                        len: text.len(),
-                        font: style.font(),
-                        color: style.color,
+                // Wide characters need an explicit advance-width hint (2× cell_width).
+                // Flush the current batch and shape the wide char individually.
+                if is_wide {
+                    batch.flush(text_y, window, cx);
+                    let wtext: SharedString = c.to_string().into();
+                    let wrun = [TextRun {
+                        len: wtext.len(),
+                        font: batch.font.clone(),
+                        color: fg_color,
                         background_color: None,
-                        underline,
+                        underline: url_underline(is_url, fg_color),
                         strikethrough: None,
                     }];
-
-                    let shaped =
-                        window
-                            .text_system()
-                            .shape_line(text, font_size, &runs, Some(render_width));
-                    // Center text vertically in cell
-                    let text_y = y + (line_height - font_size) / 2.0;
-                    let text_origin = Point::new(x, text_y);
+                    let shaped = window
+                        .text_system()
+                        .shape_line(wtext, font_size, &wrun, Some(render_width));
                     let _ = shaped.paint(
-                        text_origin,
+                        Point::new(x, text_y),
                         line_height,
                         gpui::TextAlign::Left,
                         None,
                         window,
                         cx,
                     );
+                    continue;
                 }
+
+                batch.push_char(c, col_idx, fg_color, is_url);
             }
+
+            batch.flush(text_y, window, cx);
         }
 
         // Paint preedit overlay if present

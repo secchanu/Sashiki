@@ -6,8 +6,8 @@ use super::Terminal;
 use super::input_probe;
 use crate::terminal::TerminalEvent;
 use crate::terminal::element::{
-    CellData, DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, MULTI_CLICK_THRESHOLD_MS,
-    SCROLL_LINES_WHEEL, TERMINAL_PADDING, TerminalElement, TerminalLayout,
+    DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, MULTI_CLICK_THRESHOLD_MS, SCROLL_LINES_WHEEL,
+    TERMINAL_PADDING, TerminalElement, TerminalLayout,
 };
 use crate::theme::{self, *};
 use alacritty_terminal::grid::Dimensions;
@@ -22,6 +22,7 @@ use gpui::{
     Window, div, px, rgb,
 };
 use regex::Regex;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -29,70 +30,45 @@ use std::time::{Duration, Instant};
 static URL_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"https?://[^\s\x00-\x1f\x7f<>"'\)\]]+"#).unwrap());
 
-/// A URL detected in the terminal output, with its screen coordinates.
+/// A URL detected in the terminal output.
+/// Cell-to-URL mapping is stored separately in `TerminalView::url_cells`.
 #[derive(Clone, Debug)]
 pub(super) struct DetectedUrl {
     pub url: String,
-    /// Start position (screen line, column)
-    pub start: (usize, usize),
-    /// End position (screen line, column) - inclusive
-    pub end: (usize, usize),
-}
-
-impl DetectedUrl {
-    /// Check if a screen position falls within this URL's range
-    fn contains_point(&self, screen_line: usize, col: usize) -> bool {
-        if screen_line < self.start.0 || screen_line > self.end.0 {
-            return false;
-        }
-        if self.start.0 == self.end.0 {
-            screen_line == self.start.0 && col >= self.start.1 && col <= self.end.1
-        } else if screen_line == self.start.0 {
-            col >= self.start.1
-        } else if screen_line == self.end.0 {
-            col <= self.end.1
-        } else {
-            true
-        }
-    }
 }
 
 /// Cached cell data from terminal grid.
-/// Copied from alacritty_terminal to ensure consistent state during rendering.
+/// Stores raw AnsiColor to keep cache updates cheap (no float conversion).
+/// Color conversion to Hsla happens once per frame in paint_cells.
 #[derive(Clone)]
-struct CachedCell {
-    c: char,
-    fg: AnsiColor,
-    bg: AnsiColor,
-    flags: CellFlags,
+pub(super) struct CachedCell {
+    pub c: char,
+    pub fg: AnsiColor,
+    pub bg: AnsiColor,
+    pub flags: CellFlags,
 }
 
 /// Cached terminal content snapshot.
-/// Similar to Zed's TerminalContent, this captures the entire terminal state
-/// at a specific point in time to prevent rendering intermediate states.
+/// Cells are wrapped in `Arc` so that `TerminalLayout` can share them
+/// without a deep copy (Arc::clone is O(1) vs O(rows×cols) for Vec clone).
 #[derive(Clone)]
 struct CachedContent {
-    /// Grid of cells (rows x cols)
-    cells: Vec<Vec<CachedCell>>,
-    /// Cursor position (line, column)
+    cells: Arc<Vec<Vec<CachedCell>>>,
+    /// Cursor position (line, column) in grid coordinates
     cursor: (i32, usize),
-    /// Cursor shape as reported by terminal content
     cursor_shape: CursorShape,
-    /// Whether cursor should be visible (SHOW_CURSOR mode)
     cursor_visible: bool,
-    /// Display offset for scrollback
     display_offset: i32,
-    /// Number of lines
     lines: usize,
 }
 
 /// Selection state for text selection in the terminal
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct TerminalSelection {
+pub(super) struct TerminalSelection {
     /// Start point (line, column)
-    start: (i32, usize),
+    pub(super) start: (i32, usize),
     /// End point (line, column)
-    end: (i32, usize),
+    pub(super) end: (i32, usize),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -121,7 +97,7 @@ impl TerminalSelection {
     }
 
     /// Check if a position is within the selection
-    fn contains(&self, line: i32, col: usize) -> bool {
+    pub(super) fn contains(&self, line: i32, col: usize) -> bool {
         let (start_line, start_col, end_line, end_col) = self.normalized();
         if line < start_line || line > end_line {
             return false;
@@ -166,8 +142,13 @@ pub struct TerminalView {
     cached_content: Option<CachedContent>,
     /// URLs detected in the current terminal content
     pub(super) detected_urls: Vec<DetectedUrl>,
+    /// (screen_line, col) → detected_urls index for O(1) URL lookup during layout build.
+    /// Wrapped in Arc so build_layout can share without deep-copying the map every frame.
+    pub(super) url_cells: Arc<HashMap<(usize, usize), usize>>,
     /// Index of the URL currently hovered with Ctrl held
     pub(super) hovered_url_index: Option<usize>,
+    /// Whether Ctrl key is currently held (for lazy URL detection)
+    pub(super) ctrl_held: bool,
     /// Pending Ctrl+C intent resolution.
     /// Ctrl+C is held until we can disambiguate:
     /// - normal manual Ctrl+C -> flush as SIGINT
@@ -336,7 +317,9 @@ impl TerminalView {
                     content_origin: (0.0, 0.0),
                     cached_content: None,
                     detected_urls: Vec::new(),
+                    url_cells: Arc::new(HashMap::new()),
                     hovered_url_index: None,
+                    ctrl_held: false,
                     pending_ctrl_c: None,
                     input_cursor_bounds: None,
                     input_shadow_text: String::new(),
@@ -365,7 +348,9 @@ impl TerminalView {
                 content_origin: (0.0, 0.0),
                 cached_content: None,
                 detected_urls: Vec::new(),
+                url_cells: Arc::new(HashMap::new()),
                 hovered_url_index: None,
+                ctrl_held: false,
                 pending_ctrl_c: None,
                 input_cursor_bounds: None,
                 input_shadow_text: String::new(),
@@ -452,7 +437,8 @@ impl TerminalView {
             let cols = grid.columns();
             let lines = grid.screen_lines();
 
-            // Copy all cell data from the grid
+            // Copy raw cell data without color conversion.
+            // Conversion to Hsla is deferred to paint_cells (runs once per frame).
             let mut cells = Vec::with_capacity(lines);
             for line_idx in 0..lines {
                 let actual_line = line_idx as i32 - display_offset;
@@ -473,7 +459,7 @@ impl TerminalView {
             let cursor_visible = term.mode().contains(TermMode::SHOW_CURSOR);
 
             self.cached_content = Some(CachedContent {
-                cells,
+                cells: Arc::new(cells),
                 cursor: (cursor_point.line.0, cursor_point.column.0),
                 cursor_shape,
                 cursor_visible,
@@ -482,7 +468,11 @@ impl TerminalView {
             });
         });
 
-        self.detect_urls_from_cache();
+        // Only run URL detection when Ctrl is held; URLs are only needed for Ctrl+click.
+        // During AI streaming this avoids scanning all terminal rows on every wakeup.
+        if self.ctrl_held {
+            self.detect_urls_from_cache();
+        }
         self.resolve_pending_accessibility_commit();
     }
 
@@ -609,18 +599,21 @@ impl TerminalView {
     }
 
     /// Scan cached content for URLs using regex and record their screen positions.
-    fn detect_urls_from_cache(&mut self) {
+    pub(super) fn detect_urls_from_cache(&mut self) {
         self.detected_urls.clear();
 
         let Some(ref cached) = self.cached_content else {
+            self.url_cells = Arc::new(HashMap::new());
             return;
         };
 
+        let mut url_cells = HashMap::new();
+        // Reuse a single String buffer to avoid allocating one per row
+        let mut line_text = String::new();
+
         for (line_idx, row) in cached.cells.iter().enumerate() {
-            let line_text: String = row
-                .iter()
-                .map(|cell| if cell.c == '\0' { ' ' } else { cell.c })
-                .collect();
+            line_text.clear();
+            line_text.extend(row.iter().map(|cell| if cell.c == '\0' { ' ' } else { cell.c }));
 
             for mat in URL_REGEX.find_iter(&line_text) {
                 // Strip trailing punctuation that is commonly not part of URLs
@@ -639,13 +632,19 @@ impl TerminalView {
                 let start_col = line_text[..mat.start()].chars().count();
                 let end_col = start_col + url_str.chars().count() - 1;
 
+                let url_idx = self.detected_urls.len();
                 self.detected_urls.push(DetectedUrl {
                     url: url_str.to_string(),
-                    start: (line_idx, start_col),
-                    end: (line_idx, end_col),
                 });
+
+                // Build O(1) cell lookup: store every (line, col) that belongs to this URL.
+                // URLs are always single-line (detected per-line), so start.0 == end.0.
+                for col in start_col..=end_col {
+                    url_cells.insert((line_idx, col), url_idx);
+                }
             }
         }
+        self.url_cells = Arc::new(url_cells);
     }
 
     /// Get the text content of the current selection
@@ -748,8 +747,8 @@ impl TerminalView {
     /// Handle Ctrl+click to open a URL under the cursor.
     /// Returns true if a URL was opened (so the caller can skip selection logic).
     fn try_open_url_at(&self, screen_line: usize, col: usize) -> bool {
-        for url in &self.detected_urls {
-            if url.contains_point(screen_line, col) {
+        if let Some(&url_idx) = self.url_cells.get(&(screen_line, col)) {
+            if let Some(url) = self.detected_urls.get(url_idx) {
                 let _ = open::that(&url.url);
                 return true;
             }
@@ -760,10 +759,13 @@ impl TerminalView {
     /// Update hovered URL index based on current mouse position and Ctrl state.
     fn update_hovered_url(&mut self, screen_line: usize, col: usize, ctrl: bool) {
         if ctrl {
-            self.hovered_url_index = self
-                .detected_urls
-                .iter()
-                .position(|url| url.contains_point(screen_line, col));
+            // If URL detection hasn't run yet (e.g. Ctrl was held before the window
+            // received a modifiers-changed event), scan now as a fallback.
+            if !self.ctrl_held {
+                self.ctrl_held = true;
+                self.detect_urls_from_cache();
+            }
+            self.hovered_url_index = self.url_cells.get(&(screen_line, col)).copied();
         } else {
             self.hovered_url_index = None;
         }
@@ -937,10 +939,11 @@ impl TerminalView {
 
     /// Handle scroll wheel event
     fn handle_scroll(&mut self, delta_y: f32, cx: &mut Context<Self>) {
-        let mouse_mode = self
-            .terminal
-            .as_ref()
-            .map(|t| t.mode().intersects(TermMode::MOUSE_MODE))
+        // Read TermMode once to avoid acquiring FairMutex multiple times per scroll event.
+        let mode = self.terminal.as_ref().map(|t| t.mode());
+
+        let mouse_mode = mode
+            .map(|m| m.intersects(TermMode::MOUSE_MODE))
             .unwrap_or(false);
 
         if mouse_mode {
@@ -950,15 +953,11 @@ impl TerminalView {
             return;
         }
 
-        let alt_screen = self
-            .terminal
-            .as_ref()
-            .map(|t| t.mode().contains(TermMode::ALT_SCREEN))
+        let alt_screen = mode
+            .map(|m| m.contains(TermMode::ALT_SCREEN))
             .unwrap_or(false);
-        let alt_scroll = self
-            .terminal
-            .as_ref()
-            .map(|t| t.mode().contains(TermMode::ALTERNATE_SCROLL))
+        let alt_scroll = mode
+            .map(|m| m.contains(TermMode::ALTERNATE_SCROLL))
             .unwrap_or(false);
 
         if alt_screen && alt_scroll {
@@ -994,208 +993,31 @@ impl TerminalView {
     }
 
     // ========================================================================
-    // Color conversion
-    // ========================================================================
-
-    fn ansi_color_to_hsla(color: AnsiColor) -> Hsla {
-        match color {
-            AnsiColor::Named(named) => Self::named_color_to_hsla(named),
-            AnsiColor::Spec(rgb) => Hsla::from(gpui::Rgba {
-                r: rgb.r as f32 / 255.0,
-                g: rgb.g as f32 / 255.0,
-                b: rgb.b as f32 / 255.0,
-                a: 1.0,
-            }),
-            AnsiColor::Indexed(idx) => Self::indexed_color_to_hsla(idx),
-        }
-    }
-
-    fn named_color_to_hsla(color: NamedColor) -> Hsla {
-        let rgb_val = match color {
-            NamedColor::Black => theme::ansi::BLACK,
-            NamedColor::Red => theme::ansi::RED,
-            NamedColor::Green => theme::ansi::GREEN,
-            NamedColor::Yellow => theme::ansi::YELLOW,
-            NamedColor::Blue => theme::ansi::BLUE,
-            NamedColor::Magenta => theme::ansi::MAGENTA,
-            NamedColor::Cyan => theme::ansi::CYAN,
-            NamedColor::White => theme::ansi::WHITE,
-            NamedColor::BrightBlack => theme::ansi::BRIGHT_BLACK,
-            NamedColor::BrightRed => theme::ansi::BRIGHT_RED,
-            NamedColor::BrightGreen => theme::ansi::BRIGHT_GREEN,
-            NamedColor::BrightYellow => theme::ansi::BRIGHT_YELLOW,
-            NamedColor::BrightBlue => theme::ansi::BRIGHT_BLUE,
-            NamedColor::BrightMagenta => theme::ansi::BRIGHT_MAGENTA,
-            NamedColor::BrightCyan => theme::ansi::BRIGHT_CYAN,
-            NamedColor::BrightWhite => theme::ansi::BRIGHT_WHITE,
-            NamedColor::Foreground => theme::ansi::FOREGROUND,
-            NamedColor::Background => theme::ansi::BACKGROUND,
-            NamedColor::Cursor => theme::ansi::CURSOR,
-            _ => theme::ansi::FOREGROUND,
-        };
-        Hsla::from(rgb(rgb_val))
-    }
-
-    fn indexed_color_to_hsla(idx: u8) -> Hsla {
-        if idx < 16 {
-            let named = match idx {
-                0 => NamedColor::Black,
-                1 => NamedColor::Red,
-                2 => NamedColor::Green,
-                3 => NamedColor::Yellow,
-                4 => NamedColor::Blue,
-                5 => NamedColor::Magenta,
-                6 => NamedColor::Cyan,
-                7 => NamedColor::White,
-                8 => NamedColor::BrightBlack,
-                9 => NamedColor::BrightRed,
-                10 => NamedColor::BrightGreen,
-                11 => NamedColor::BrightYellow,
-                12 => NamedColor::BrightBlue,
-                13 => NamedColor::BrightMagenta,
-                14 => NamedColor::BrightCyan,
-                15 => NamedColor::BrightWhite,
-                _ => NamedColor::Foreground,
-            };
-            Self::named_color_to_hsla(named)
-        } else if idx < 232 {
-            // 216 color cube (6x6x6)
-            let idx = idx - 16;
-            let r = (idx / 36) % 6;
-            let g = (idx / 6) % 6;
-            let b = idx % 6;
-            let to_val = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-            Hsla::from(gpui::Rgba {
-                r: to_val(r) as f32 / 255.0,
-                g: to_val(g) as f32 / 255.0,
-                b: to_val(b) as f32 / 255.0,
-                a: 1.0,
-            })
-        } else {
-            // 24 grayscale colors
-            let gray = 8 + (idx - 232) * 10;
-            Hsla::from(gpui::Rgba {
-                r: gray as f32 / 255.0,
-                g: gray as f32 / 255.0,
-                b: gray as f32 / 255.0,
-                a: 1.0,
-            })
-        }
-    }
-
-    // ========================================================================
     // Layout building
     // ========================================================================
 
-    /// Build terminal layout data for paint phase rendering.
-    /// Always uses cached content for consistent state (like Zed's approach).
-    /// Cache is initialized at terminal creation and updated on every event.
+    /// Build terminal layout for the paint phase.
+    /// Shares cell data from cache via Arc::clone (O(1) instead of O(rows×cols)).
     pub(super) fn build_layout(
         &self,
         cell_width: Pixels,
         line_height: Pixels,
     ) -> Option<TerminalLayout> {
         let cached = self.cached_content.as_ref()?;
-        Some(self.build_layout_from_cache(cached, cell_width, line_height))
-    }
-
-    /// Build layout from cached content (consistent state)
-    fn build_layout_from_cache(
-        &self,
-        cached: &CachedContent,
-        cell_width: Pixels,
-        line_height: Pixels,
-    ) -> TerminalLayout {
-        let selection = self.selection;
-        let (cursor_line, cursor_col) = cached.cursor;
-        let cursor_shape = cached.cursor_shape;
-        let cursor_visible = cached.cursor_visible;
-        let display_offset = cached.display_offset;
-        let hovered_url_index = self.hovered_url_index;
-
-        // Convert cursor to display coordinates
-        let display_cursor_line = cursor_line + display_offset;
-
-        let mut cells: Vec<Vec<CellData>> = Vec::with_capacity(cached.lines);
-
-        for (line_idx, cached_row) in cached.cells.iter().enumerate() {
-            let actual_line = line_idx as i32 - display_offset;
-            let is_cursor_line = line_idx as i32 == display_cursor_line;
-
-            let mut row_cells: Vec<CellData> = Vec::with_capacity(cached_row.len());
-
-            for (col_idx, cached_cell) in cached_row.iter().enumerate() {
-                let is_inverse = cached_cell.flags.contains(CellFlags::INVERSE);
-
-                // Swap fg/bg when INVERSE flag is set (used by TUI apps for software cursors)
-                let (fg, bg) = if is_inverse {
-                    let fg = if cached_cell.bg == AnsiColor::Named(NamedColor::Background) {
-                        Self::named_color_to_hsla(NamedColor::Background)
-                    } else {
-                        Self::ansi_color_to_hsla(cached_cell.bg)
-                    };
-                    let bg = Some(Self::ansi_color_to_hsla(cached_cell.fg));
-                    (fg, bg)
-                } else {
-                    let fg = Self::ansi_color_to_hsla(cached_cell.fg);
-                    let bg = if cached_cell.bg == AnsiColor::Named(NamedColor::Background) {
-                        None
-                    } else {
-                        Some(Self::ansi_color_to_hsla(cached_cell.bg))
-                    };
-                    (fg, bg)
-                };
-
-                // Only show cursor if SHOW_CURSOR mode is enabled
-                let is_cursor = cursor_visible && is_cursor_line && col_idx == cursor_col;
-                let is_selected = selection
-                    .filter(|sel| sel.start != sel.end)
-                    .map(|sel| sel.contains(actual_line, col_idx))
-                    .unwrap_or(false);
-
-                let c = if cached_cell.c == ' ' || cached_cell.c == '\0' {
-                    ' '
-                } else {
-                    cached_cell.c
-                };
-
-                let is_wide_char = cached_cell.flags.contains(CellFlags::WIDE_CHAR);
-                let is_wide_spacer = cached_cell.flags.contains(CellFlags::WIDE_CHAR_SPACER);
-
-                // Check if this cell is part of a detected URL
-                let mut is_url = false;
-                let mut is_url_hovered = false;
-                for (url_idx, url) in self.detected_urls.iter().enumerate() {
-                    if url.contains_point(line_idx, col_idx) {
-                        is_url = true;
-                        is_url_hovered = hovered_url_index == Some(url_idx);
-                        break;
-                    }
-                }
-
-                row_cells.push(CellData {
-                    c,
-                    fg,
-                    bg,
-                    is_cursor,
-                    is_selected,
-                    is_wide_char,
-                    is_wide_spacer,
-                    is_url,
-                    is_url_hovered,
-                });
-            }
-
-            cells.push(row_cells);
-        }
-
-        TerminalLayout {
-            cells,
+        let display_cursor_line = cached.cursor.0 + cached.display_offset;
+        Some(TerminalLayout {
+            cells: Arc::clone(&cached.cells),
             cell_width,
             line_height,
-            cursor_shape,
+            cursor_shape: cached.cursor_shape,
+            cursor: (display_cursor_line, cached.cursor.1),
+            cursor_visible: cached.cursor_visible,
+            display_offset: cached.display_offset,
+            selection: self.selection,
+            url_cells: Arc::clone(&self.url_cells),
+            hovered_url_index: self.hovered_url_index,
             preedit_text: self.preedit_text.clone(),
-        }
+        })
     }
 
     /// Compute caret bounds used by IME/text-input integrations.
@@ -1237,6 +1059,105 @@ impl TerminalView {
                 height: line_height,
             },
         ))
+    }
+}
+
+// ============================================================================
+// Color conversion (free functions, used by element.rs paint path)
+// ============================================================================
+
+/// Pre-computed HSLA values for named colors.
+/// Eliminates per-cell RGB→HSLA conversion for the most common color type.
+static NAMED_COLOR_TABLE: LazyLock<[Hsla; 20]> = LazyLock::new(|| {
+    [
+        Hsla::from(rgb(theme::ansi::BLACK)),          // 0: Black
+        Hsla::from(rgb(theme::ansi::RED)),            // 1: Red
+        Hsla::from(rgb(theme::ansi::GREEN)),          // 2: Green
+        Hsla::from(rgb(theme::ansi::YELLOW)),         // 3: Yellow
+        Hsla::from(rgb(theme::ansi::BLUE)),           // 4: Blue
+        Hsla::from(rgb(theme::ansi::MAGENTA)),        // 5: Magenta
+        Hsla::from(rgb(theme::ansi::CYAN)),           // 6: Cyan
+        Hsla::from(rgb(theme::ansi::WHITE)),          // 7: White
+        Hsla::from(rgb(theme::ansi::BRIGHT_BLACK)),   // 8: BrightBlack
+        Hsla::from(rgb(theme::ansi::BRIGHT_RED)),     // 9: BrightRed
+        Hsla::from(rgb(theme::ansi::BRIGHT_GREEN)),   // 10: BrightGreen
+        Hsla::from(rgb(theme::ansi::BRIGHT_YELLOW)),  // 11: BrightYellow
+        Hsla::from(rgb(theme::ansi::BRIGHT_BLUE)),    // 12: BrightBlue
+        Hsla::from(rgb(theme::ansi::BRIGHT_MAGENTA)), // 13: BrightMagenta
+        Hsla::from(rgb(theme::ansi::BRIGHT_CYAN)),    // 14: BrightCyan
+        Hsla::from(rgb(theme::ansi::BRIGHT_WHITE)),   // 15: BrightWhite
+        Hsla::from(rgb(theme::ansi::FOREGROUND)),     // 16: Foreground
+        Hsla::from(rgb(theme::ansi::BACKGROUND)),     // 17: Background
+        Hsla::from(rgb(theme::ansi::CURSOR)),         // 18: Cursor
+        Hsla::from(rgb(theme::ansi::FOREGROUND)),     // 19: fallback
+    ]
+});
+
+pub(super) fn ansi_color_to_hsla(color: AnsiColor) -> Hsla {
+    match color {
+        AnsiColor::Named(named) => named_color_to_hsla(named),
+        AnsiColor::Spec(c) => Hsla::from(gpui::Rgba {
+            r: c.r as f32 / 255.0,
+            g: c.g as f32 / 255.0,
+            b: c.b as f32 / 255.0,
+            a: 1.0,
+        }),
+        AnsiColor::Indexed(idx) => indexed_color_to_hsla(idx),
+    }
+}
+
+pub(super) fn named_color_to_hsla(color: NamedColor) -> Hsla {
+    let idx = match color {
+        NamedColor::Black => 0,
+        NamedColor::Red => 1,
+        NamedColor::Green => 2,
+        NamedColor::Yellow => 3,
+        NamedColor::Blue => 4,
+        NamedColor::Magenta => 5,
+        NamedColor::Cyan => 6,
+        NamedColor::White => 7,
+        NamedColor::BrightBlack => 8,
+        NamedColor::BrightRed => 9,
+        NamedColor::BrightGreen => 10,
+        NamedColor::BrightYellow => 11,
+        NamedColor::BrightBlue => 12,
+        NamedColor::BrightMagenta => 13,
+        NamedColor::BrightCyan => 14,
+        NamedColor::BrightWhite => 15,
+        NamedColor::Foreground => 16,
+        NamedColor::Background => 17,
+        NamedColor::Cursor => 18,
+        _ => 19,
+    };
+    NAMED_COLOR_TABLE[idx]
+}
+
+fn indexed_color_to_hsla(idx: u8) -> Hsla {
+    if idx < 16 {
+        // First 16 indexed colors map to named colors
+        NAMED_COLOR_TABLE[idx as usize]
+    } else if idx < 232 {
+        // 216 color cube (6x6x6)
+        let i = idx - 16;
+        let r = (i / 36) % 6;
+        let g = (i / 6) % 6;
+        let b = i % 6;
+        let to_val = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+        Hsla::from(gpui::Rgba {
+            r: to_val(r) as f32 / 255.0,
+            g: to_val(g) as f32 / 255.0,
+            b: to_val(b) as f32 / 255.0,
+            a: 1.0,
+        })
+    } else {
+        // 24 grayscale colors
+        let gray = 8 + (idx - 232) * 10;
+        Hsla::from(gpui::Rgba {
+            r: gray as f32 / 255.0,
+            g: gray as f32 / 255.0,
+            b: gray as f32 / 255.0,
+            a: 1.0,
+        })
     }
 }
 
@@ -1420,6 +1341,14 @@ impl Render for TerminalView {
                         if this.is_mode_set(TermMode::FOCUS_IN_OUT) {
                             this.write_to_terminal(b"\x1b[O");
                         }
+                        // Reset modifier tracking so ctrl_held doesn't get stuck when
+                        // the window loses focus (no ModifiersChangedEvent is sent).
+                        if this.ctrl_held {
+                            this.ctrl_held = false;
+                            this.detected_urls.clear();
+                            this.url_cells = Arc::new(HashMap::new());
+                            this.hovered_url_index = None;
+                        }
                     }),
                 );
         }
@@ -1566,24 +1495,36 @@ impl Render for TerminalView {
                 let x: f32 = event.position.x.into();
                 let y: f32 = event.position.y.into();
 
+                // Read TermMode once to avoid acquiring FairMutex multiple times per event.
+                let mode = this.terminal.as_ref().map(|t| t.mode());
+
                 // If MOUSE_MOTION mode: send every move; if MOUSE_DRAG: only send when dragging.
-                if this.is_mode_set(TermMode::MOUSE_MOTION) {
+                if mode.map_or(false, |m| m.contains(TermMode::MOUSE_MOTION)) {
                     let (screen_line, col) = this.position_to_cell(x, y);
                     this.send_mouse_event_to_pty(32, col, screen_line as usize, true);
                     return;
-                } else if this.is_dragging && this.is_mode_set(TermMode::MOUSE_DRAG) {
+                } else if this.is_dragging
+                    && mode.map_or(false, |m| m.contains(TermMode::MOUSE_DRAG))
+                {
                     let (screen_line, col) = this.position_to_cell(x, y);
                     this.send_mouse_event_to_pty(32, col, screen_line as usize, true);
-                    // Keep local drag handling active for selection visuals.
                 }
 
                 if this.is_dragging {
                     this.handle_mouse_drag(x, y, cx);
+                    return;
                 }
-                let (screen_line, col) = this.position_to_cell(x, y);
-                let prev = this.hovered_url_index;
-                this.update_hovered_url(screen_line as usize, col, event.modifiers.control);
-                if this.hovered_url_index != prev {
+
+                // URL hover check only when Ctrl is held
+                if event.modifiers.control {
+                    let (screen_line, col) = this.position_to_cell(x, y);
+                    let prev = this.hovered_url_index;
+                    this.update_hovered_url(screen_line as usize, col, true);
+                    if this.hovered_url_index != prev {
+                        cx.notify();
+                    }
+                } else if this.hovered_url_index.is_some() {
+                    this.hovered_url_index = None;
                     cx.notify();
                 }
             }))

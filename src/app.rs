@@ -13,7 +13,8 @@ use crate::lsp::LspManager;
 use crate::session::{SessionGroup, SessionGroupManager};
 use crate::template::TemplateConfig;
 use crate::terminal::TerminalView;
-use crate::ui::{ChangeSection, FileListMode, FileView, GotoDefinitionEvent, StageSelectionEvent};
+use crate::ui::{ChangeSection, FileListMode, FileView, GotoDefinitionEvent, StageSelectionEvent,
+    TextInput};
 use async_lock::Mutex as AsyncMutex;
 use gpui::{AppContext, Context, Entity, FocusHandle};
 use std::collections::HashSet;
@@ -63,17 +64,11 @@ pub struct SashikiApp {
     pub(crate) show_file_list: bool,
     pub(crate) show_file_view: bool,
     pub(crate) active_dialog: ActiveDialog,
-    pub(crate) create_branch_input: String,
-    pub(crate) create_branch_cursor: usize,
-    pub(crate) create_branch_selection_anchor: Option<usize>,
-    pub(crate) commit_message_input: String,
-    pub(crate) commit_message_cursor: usize,
-    pub(crate) commit_message_selection_anchor: Option<usize>,
+    pub(crate) create_input: Entity<TextInput>,
+    pub(crate) commit_input: Entity<TextInput>,
     /// true when the commit dialog is being used to amend the last commit
     pub(crate) commit_amend_mode: bool,
-    pub(crate) stash_message_input: String,
-    pub(crate) stash_message_cursor: usize,
-    pub(crate) stash_message_selection_anchor: Option<usize>,
+    pub(crate) stash_input: Entity<TextInput>,
     pub(crate) stash_entries: Vec<crate::git::StashEntry>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) create_dialog_focus: FocusHandle,
@@ -82,11 +77,7 @@ pub struct SashikiApp {
     /// Template config being edited in the settings dialog
     pub(crate) template_edit: Option<TemplateConfig>,
     /// Input fields for template settings dialog (one per section, newline-delimited)
-    pub(crate) settings_inputs: [String; 5],
-    /// Cursor position (char index) per section
-    pub(crate) settings_cursors: [usize; 5],
-    /// Selection anchor (char index) per section
-    pub(crate) settings_selection_anchors: [Option<usize>; 5],
+    pub(crate) settings_inputs: [Entity<TextInput>; 5],
     /// Which section is active in settings (0=pre, 1=copy, 2=sync, 3=post, 4=workdir)
     pub(crate) settings_active_section: usize,
     /// Which group's template settings are being edited
@@ -175,25 +166,17 @@ impl SashikiApp {
             show_file_list: true,
             show_file_view: false,
             active_dialog,
-            create_branch_input: String::new(),
-            create_branch_cursor: 0,
-            create_branch_selection_anchor: None,
-            commit_message_input: String::new(),
-            commit_message_cursor: 0,
-            commit_message_selection_anchor: None,
+            create_input: cx.new(|_| TextInput::new()),
+            commit_input: cx.new(|_| TextInput::new()),
             commit_amend_mode: false,
-            stash_message_input: String::new(),
-            stash_message_cursor: 0,
-            stash_message_selection_anchor: None,
+            stash_input: cx.new(|_| TextInput::new()),
             stash_entries: Vec::new(),
             focus_handle,
             create_dialog_focus,
             commit_dialog_focus,
             stash_dialog_focus,
             template_edit: None,
-            settings_inputs: Default::default(),
-            settings_cursors: Default::default(),
-            settings_selection_anchors: Default::default(),
+            settings_inputs: std::array::from_fn(|_| cx.new(|_| TextInput::new())),
             settings_active_section: 0,
             settings_group_index: 0,
             settings_dialog_focus: cx.focus_handle(),

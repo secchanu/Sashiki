@@ -11,9 +11,7 @@ use std::path::{Path, PathBuf};
 impl SashikiApp {
     pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_dialog = ActiveDialog::CreateWorktree;
-        self.create_branch_input.clear();
-        self.create_branch_cursor = 0;
-        self.create_branch_selection_anchor = None;
+        self.create_input.update(cx, |input, _| input.clear());
         cx.notify();
         // Focus on the next frame so track_focus has registered in the tree.
         cx.on_next_frame(window, |this, window, cx| {
@@ -24,9 +22,7 @@ impl SashikiApp {
 
     pub fn close_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_dialog = ActiveDialog::None;
-        self.create_branch_input.clear();
-        self.create_branch_cursor = 0;
-        self.create_branch_selection_anchor = None;
+        self.create_input.update(cx, |input, _| input.clear());
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -60,9 +56,7 @@ impl SashikiApp {
 
         self.commit_amend_mode = false;
         self.active_dialog = ActiveDialog::Commit;
-        self.commit_message_input.clear();
-        self.commit_message_cursor = 0;
-        self.commit_message_selection_anchor = None;
+        self.commit_input.update(cx, |input, _| input.clear());
         cx.notify();
         // Focus on the next frame so track_focus has registered in the tree.
         cx.on_next_frame(window, |this, window, cx| {
@@ -85,9 +79,7 @@ impl SashikiApp {
 
         self.commit_amend_mode = true;
         self.active_dialog = ActiveDialog::Commit;
-        self.commit_message_input = last_msg;
-        self.commit_message_cursor = self.commit_message_input.chars().count();
-        self.commit_message_selection_anchor = None;
+        self.commit_input.update(cx, |input, _| input.set_text(last_msg));
         cx.notify();
         // Focus on the next frame so track_focus has registered in the tree.
         cx.on_next_frame(window, |this, window, cx| {
@@ -99,9 +91,7 @@ impl SashikiApp {
     pub fn close_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_dialog = ActiveDialog::None;
         self.commit_amend_mode = false;
-        self.commit_message_input.clear();
-        self.commit_message_cursor = 0;
-        self.commit_message_selection_anchor = None;
+        self.commit_input.update(cx, |input, _| input.clear());
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -110,7 +100,7 @@ impl SashikiApp {
     }
 
     pub fn submit_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let message = self.commit_message_input.trim().to_string();
+        let message = self.commit_input.read(cx).text().trim().to_string();
         if message.is_empty() {
             self.active_dialog = ActiveDialog::Error {
                 message: "Commit message cannot be empty".to_string(),
@@ -192,9 +182,7 @@ impl SashikiApp {
                 }
                 self.stash_entries = entries;
                 self.stash_expanded_entries.clear();
-                self.stash_message_input.clear();
-                self.stash_message_cursor = 0;
-                self.stash_message_selection_anchor = None;
+                self.stash_input.update(cx, |input, _| input.clear());
                 self.active_dialog = ActiveDialog::Stash;
                 cx.notify();
                 // Focus on the next frame so track_focus has registered in the tree.
@@ -214,9 +202,7 @@ impl SashikiApp {
 
     pub fn close_stash_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_dialog = ActiveDialog::None;
-        self.stash_message_input.clear();
-        self.stash_message_cursor = 0;
-        self.stash_message_selection_anchor = None;
+        self.stash_input.update(cx, |input, _| input.clear());
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -225,7 +211,7 @@ impl SashikiApp {
     }
 
     pub fn create_stash(&mut self, cx: &mut Context<Self>) {
-        let message = self.stash_message_input.trim().to_string();
+        let message = self.stash_input.read(cx).text().trim().to_string();
         let mode = self.stash_mode;
         let result = if let Some(repo) = self.worktree_repo() {
             if message.is_empty() {
@@ -241,9 +227,7 @@ impl SashikiApp {
 
         match result {
             Ok(()) => {
-                self.stash_message_input.clear();
-                self.stash_message_cursor = 0;
-                self.stash_message_selection_anchor = None;
+                self.stash_input.update(cx, |input, _| input.clear());
                 self.refresh_file_list_async(cx);
                 self.refresh_stash_entries(cx);
             }
@@ -339,7 +323,7 @@ impl SashikiApp {
     }
 
     pub fn submit_create_worktree(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let branch = self.create_branch_input.trim().to_string();
+        let branch = self.create_input.read(cx).text().trim().to_string();
 
         if let Err(msg) = validate_branch_name(&branch) {
             self.active_dialog = ActiveDialog::Error {
@@ -400,9 +384,7 @@ impl SashikiApp {
         let worktree_name = branch.replace('/', "-");
 
         // Close create dialog state (branch input is no longer needed)
-        self.create_branch_input.clear();
-        self.create_branch_cursor = 0;
-        self.create_branch_selection_anchor = None;
+        self.create_input.update(cx, |input, _| input.clear());
 
         // Spawn async creation pipeline
         cx.spawn(async move |entity, cx| {
@@ -738,7 +720,7 @@ impl SashikiApp {
             return;
         }
 
-        let message = self.commit_message_input.trim().to_string();
+        let message = self.commit_input.read(cx).text().trim().to_string();
         let result = if let Some(repo) = self.worktree_repo() {
             repo.commit(&message)
         } else {
@@ -775,7 +757,7 @@ impl SashikiApp {
 
     /// Execute the amend after user confirmed via AmendCommitConfirm dialog.
     pub fn confirm_amend_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let message = self.commit_message_input.trim().to_string();
+        let message = self.commit_input.read(cx).text().trim().to_string();
         let result = if let Some(repo) = self.worktree_repo() {
             repo.amend_commit(Some(&message))
         } else {
@@ -1099,23 +1081,18 @@ impl SashikiApp {
             .map(|g| TemplateConfig::load(&g.git_repo))
             .unwrap_or_default();
         self.settings_group_index = group_index;
-        self.settings_inputs = [
+        let texts = [
             template.pre_create_commands.join("\n"),
             template.file_copies.join("\n"),
             template.file_syncs.join("\n"),
             template.post_create_commands.join("\n"),
             template.working_directory.clone().unwrap_or_default(),
         ];
-        self.settings_cursors = [
-            self.settings_inputs[0].chars().count(),
-            self.settings_inputs[1].chars().count(),
-            self.settings_inputs[2].chars().count(),
-            self.settings_inputs[3].chars().count(),
-            self.settings_inputs[4].chars().count(),
-        ];
+        for (i, text) in texts.into_iter().enumerate() {
+            self.settings_inputs[i].update(cx, |input, _| input.set_text(text));
+        }
         self.template_edit = Some(template);
         self.settings_active_section = 0;
-        self.settings_selection_anchors = Default::default();
         self.active_dialog = ActiveDialog::TemplateSettings;
         cx.notify();
         // Focus on the next frame so track_focus has registered the handle
@@ -1128,9 +1105,9 @@ impl SashikiApp {
 
     pub fn close_template_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.template_edit = None;
-        self.settings_inputs = Default::default();
-        self.settings_cursors = Default::default();
-        self.settings_selection_anchors = Default::default();
+        for input in &self.settings_inputs {
+            input.update(cx, |i, _| i.clear());
+        }
         self.active_dialog = ActiveDialog::None;
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
@@ -1147,12 +1124,16 @@ impl SashikiApp {
                 .collect()
         };
 
+        let texts: Vec<String> = self.settings_inputs.iter()
+            .map(|e| e.read(cx).text().to_string())
+            .collect();
+
         if let Some(ref mut template) = self.template_edit {
-            template.pre_create_commands = parse_lines(&self.settings_inputs[0]);
-            template.file_copies = parse_lines(&self.settings_inputs[1]);
-            template.file_syncs = parse_lines(&self.settings_inputs[2]);
-            template.post_create_commands = parse_lines(&self.settings_inputs[3]);
-            let workdir = self.settings_inputs[4].trim().to_string();
+            template.pre_create_commands = parse_lines(&texts[0]);
+            template.file_copies = parse_lines(&texts[1]);
+            template.file_syncs = parse_lines(&texts[2]);
+            template.post_create_commands = parse_lines(&texts[3]);
+            let workdir = texts[4].trim().to_string();
             template.working_directory = if workdir.is_empty() {
                 None
             } else {
@@ -1174,9 +1155,9 @@ impl SashikiApp {
         self.apply_template_working_directory_defaults();
 
         self.template_edit = None;
-        self.settings_inputs = Default::default();
-        self.settings_cursors = Default::default();
-        self.settings_selection_anchors = Default::default();
+        for input in &self.settings_inputs {
+            input.update(cx, |i, _| i.clear());
+        }
         self.active_dialog = ActiveDialog::None;
         if let Some(terminal) = self.active_terminal() {
             let focus = terminal.read(cx).focus_handle(cx);
@@ -1235,3 +1216,4 @@ impl SashikiApp {
         .detach();
     }
 }
+
