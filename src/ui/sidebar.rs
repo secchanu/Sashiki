@@ -1,7 +1,7 @@
 //! Sidebar rendering for session list
 
 use crate::app::SashikiApp;
-use crate::session::{LayoutMode, SessionGroup, SessionStatus};
+use crate::session::{LayoutMode, SessionGroup};
 use crate::theme::*;
 use crate::ui::{render_locked_badge, render_main_badge};
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, prelude::*, px, rgb};
@@ -232,7 +232,6 @@ impl SashikiApp {
         let is_main = session.is_main();
         let is_locked = session.is_locked();
         let color = session.color().primary;
-        let status = session.status();
         let visible_in_parallel = session.is_visible_in_parallel();
 
         let is_selected = if !is_active_group {
@@ -286,21 +285,6 @@ impl SashikiApp {
                     )
                 },
             )
-            .when(
-                layout_mode == LayoutMode::Single || !is_active_group,
-                |el| {
-                    el.child(
-                        div()
-                            .text_color(match status {
-                                SessionStatus::Focused => rgb(GREEN),
-                                SessionStatus::Running => rgb(YELLOW),
-                                SessionStatus::Stopped => rgb(TEXT_MUTED),
-                            })
-                            .text_sm()
-                            .child(status.symbol()),
-                    )
-                },
-            )
             .child(div().w_2().h_2().rounded_full().bg(rgb(color)))
             .child(self.render_session_name_section(name, branch, is_main, is_locked))
             .when(
@@ -330,6 +314,8 @@ impl SashikiApp {
         is_main: bool,
         is_locked: bool,
     ) -> impl IntoElement {
+        // ブランチ名を主テキストとして使用。ブランチ名がない場合（detached HEAD等）はセッション名で代替
+        let display_name = branch.unwrap_or(name);
         div()
             .flex_1()
             .flex()
@@ -341,19 +327,16 @@ impl SashikiApp {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_color(rgb(TEXT)).text_sm().truncate().child(name))
+                    .child(
+                        div()
+                            .text_color(rgb(TEXT))
+                            .text_sm()
+                            .truncate()
+                            .child(display_name),
+                    )
                     .when(is_main, |el| el.child(render_main_badge()))
                     .when(is_locked, |el| el.child(render_locked_badge())),
             )
-            .when_some(branch, |el, b| {
-                el.child(
-                    div()
-                        .text_color(rgb(TEXT_MUTED))
-                        .text_xs()
-                        .truncate()
-                        .child(format!("⎇ {}", b)),
-                )
-            })
     }
 
     fn render_create_button(&self, cx: &Context<Self>) -> impl IntoElement {

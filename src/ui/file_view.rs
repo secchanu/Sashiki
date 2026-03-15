@@ -376,10 +376,6 @@ impl FileView {
         })
     }
 
-    fn selected_focus_line(&self) -> Option<usize> {
-        self.selected_line_focus.or(self.selected_line_anchor)
-    }
-
     fn is_line_selected(&self, line: usize) -> bool {
         self.selected_line_range()
             .is_some_and(|(start, end)| line >= start && line <= end)

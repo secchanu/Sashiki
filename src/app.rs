@@ -509,10 +509,6 @@ impl SashikiApp {
         cx.notify();
     }
 
-    /// アクティブグループのリポジトリを返す
-    pub fn active_git_repo(&self) -> Option<&GitRepo> {
-        self.session_manager.active_git_repo()
-    }
 
     pub(crate) fn apply_template_working_directory_defaults(&mut self) {
         let relative = self

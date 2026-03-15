@@ -669,10 +669,6 @@ impl SessionGroup {
         &self.project_path
     }
 
-    pub fn git_repo(&self) -> &crate::git::GitRepo {
-        &self.git_repo
-    }
-
     pub fn is_expanded(&self) -> bool {
         self.expanded
     }
@@ -839,18 +835,6 @@ impl SessionGroupManager {
     pub fn toggle_parallel_visibility(&mut self, index: usize) {
         if let Some(g) = self.active_group_mut() {
             g.session_manager.toggle_parallel_visibility(index);
-        }
-    }
-
-    pub fn find_session_by_path(&self, path: &std::path::Path) -> Option<usize> {
-        self.active_group()?
-            .session_manager
-            .find_session_by_path(path)
-    }
-
-    pub fn init_from_worktrees(&mut self, worktrees: Vec<crate::git::Worktree>) {
-        if let Some(g) = self.active_group_mut() {
-            g.session_manager.init_from_worktrees(worktrees);
         }
     }
 
