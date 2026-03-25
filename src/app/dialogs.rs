@@ -79,7 +79,8 @@ impl SashikiApp {
 
         self.commit_amend_mode = true;
         self.active_dialog = ActiveDialog::Commit;
-        self.commit_input.update(cx, |input, _| input.set_text(last_msg));
+        self.commit_input
+            .update(cx, |input, _| input.set_text(last_msg));
         cx.notify();
         // Focus on the next frame so track_focus has registered in the tree.
         cx.on_next_frame(window, |this, window, cx| {
@@ -1124,7 +1125,9 @@ impl SashikiApp {
                 .collect()
         };
 
-        let texts: Vec<String> = self.settings_inputs.iter()
+        let texts: Vec<String> = self
+            .settings_inputs
+            .iter()
             .map(|e| e.read(cx).text().to_string())
             .collect();
 
@@ -1216,4 +1219,3 @@ impl SashikiApp {
         .detach();
     }
 }
-

@@ -7,6 +7,7 @@ mod app;
 mod dialog;
 mod git;
 mod highlight;
+mod icon;
 mod language;
 mod lsp;
 mod session;
@@ -24,6 +25,7 @@ use terminal::TerminalView;
 
 fn main() {
     Application::new().run(|app: &mut App| {
+        icon::init();
         // Global bindings must be registered BEFORE terminal bindings.
         // GPUI resolves ties (same context depth) by LIFO, so terminal-specific
         // bindings registered later will correctly override these when focused.

@@ -20,7 +20,7 @@ pub const OVERLAY: u32 = 0x000000B3; // rgba(0, 0, 0, 0.7)
 // Text colors (from yukidama-ui semantic dark mode)
 pub const TEXT: u32 = 0xeef2f7; // neutral[50] - primary text
 pub const TEXT_SECONDARY: u32 = 0x9da6af; // neutral[400] - secondary text
-pub const TEXT_MUTED: u32 = 0x6c7680; // neutral[500] - tertiary/muted
+pub const TEXT_MUTED: u32 = 0x8590a0; // neutral[450] - tertiary/muted (WCAG AA: 4.66:1 on SURFACE0)
 
 // Accent colors (using yukidama-ui palette, 400 level for dark mode visibility)
 pub const BLUE: u32 = 0x74a9e4; // primary[400] - main theme color

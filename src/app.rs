@@ -13,8 +13,9 @@ use crate::lsp::LspManager;
 use crate::session::{SessionGroup, SessionGroupManager};
 use crate::template::TemplateConfig;
 use crate::terminal::TerminalView;
-use crate::ui::{ChangeSection, FileListMode, FileView, GotoDefinitionEvent, StageSelectionEvent,
-    TextInput};
+use crate::ui::{
+    ChangeSection, FileListMode, FileView, GotoDefinitionEvent, StageSelectionEvent, TextInput,
+};
 use async_lock::Mutex as AsyncMutex;
 use gpui::{AppContext, Context, Entity, FocusHandle};
 use std::collections::HashSet;
@@ -85,6 +86,10 @@ pub struct SashikiApp {
     pub(crate) settings_dialog_focus: FocusHandle,
     /// Which menu dropdown is currently open (None = all closed)
     pub(crate) open_menu: Option<MenuId>,
+    /// Focus handle for the menu overlay (keyboard navigation)
+    pub(crate) menu_focus: FocusHandle,
+    /// Currently highlighted menu item index for keyboard navigation
+    pub(crate) menu_focused_item: usize,
     /// Whether the verify terminal (2nd terminal) is shown in single mode
     pub(crate) show_verify_terminal: bool,
     pub(crate) sidebar_width: f32,
@@ -113,6 +118,7 @@ impl SashikiApp {
         let create_dialog_focus = cx.focus_handle();
         let commit_dialog_focus = cx.focus_handle();
         let stash_dialog_focus = cx.focus_handle();
+        let menu_focus = cx.focus_handle();
         let file_view = cx.new(FileView::new);
 
         // Subscribe to SendToTerminalEvent from FileView
@@ -181,6 +187,8 @@ impl SashikiApp {
             settings_group_index: 0,
             settings_dialog_focus: cx.focus_handle(),
             open_menu: None,
+            menu_focus,
+            menu_focused_item: 0,
             show_verify_terminal: false,
             sidebar_width: 224.0,
             file_view_height: 384.0,
@@ -508,7 +516,6 @@ impl SashikiApp {
 
         cx.notify();
     }
-
 
     pub(crate) fn apply_template_working_directory_defaults(&mut self) {
         let relative = self

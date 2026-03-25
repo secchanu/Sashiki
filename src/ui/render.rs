@@ -2,11 +2,12 @@
 
 use crate::app::{MenuId, ResizeDrag, SashikiApp};
 use crate::dialog::ActiveDialog;
+use crate::icon;
 use crate::session::LayoutMode;
 use crate::theme::*;
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, MouseButton, Render, Styled, Window, div,
-    prelude::*, px, rgb,
+    App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Styled,
+    Window, div, prelude::*, px, rgb,
 };
 
 impl Focusable for SashikiApp {
@@ -189,7 +190,7 @@ impl SashikiApp {
                         div()
                             .id("toggle-parallel")
                             .px_2()
-                            .py_1()
+                            .min_h(px(24.0))
                             .rounded_sm()
                             .cursor_pointer()
                             .bg(if layout_mode == LayoutMode::Parallel {
@@ -203,11 +204,29 @@ impl SashikiApp {
                                 rgb(TEXT)
                             })
                             .hover(|this| this.bg(rgb(BG_SURFACE2)))
-                            .text_xs()
+                            .text_sm()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.session_manager.toggle_layout_mode();
                                 cx.notify();
                             }))
+                            .child(
+                                if layout_mode == LayoutMode::Parallel {
+                                    icon::layout_grid()
+                                } else {
+                                    icon::layout_single()
+                                }
+                                .size(px(14.0))
+                                .text_color(
+                                    if layout_mode == LayoutMode::Parallel {
+                                        rgb(BG_BASE)
+                                    } else {
+                                        rgb(TEXT)
+                                    },
+                                ),
+                            )
                             .child(if layout_mode == LayoutMode::Parallel {
                                 "Parallel"
                             } else {
@@ -235,7 +254,7 @@ impl SashikiApp {
         div()
             .id(label_owned.clone())
             .px_2()
-            .py_1()
+            .min_h(px(24.0))
             .rounded_sm()
             .cursor_pointer()
             .bg(if is_open {
@@ -244,18 +263,24 @@ impl SashikiApp {
                 rgb(BG_SURFACE0)
             })
             .hover(|this| this.bg(rgb(BG_SURFACE2)))
-            .text_xs()
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .text_sm()
+            .flex()
+            .items_center()
+            .on_click(cx.listener(move |this, _, window, cx| {
                 if this.open_menu == Some(menu_id) {
                     this.open_menu = None;
                 } else {
                     this.open_menu = Some(menu_id);
+                    this.menu_focused_item = 0;
+                    window.focus(&this.menu_focus, cx);
                 }
                 cx.notify();
             }))
-            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+            .on_mouse_move(cx.listener(move |this, _, window, cx| {
                 if this.open_menu.is_some() && this.open_menu != Some(menu_id) {
                     this.open_menu = Some(menu_id);
+                    this.menu_focused_item = 0;
+                    window.focus(&this.menu_focus, cx);
                     cx.notify();
                 }
             }))
@@ -277,9 +302,10 @@ impl SashikiApp {
         match menu_id {
             MenuId::App => {
                 dropdown = dropdown
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Template Settings...",
                         None,
+                        0,
                         cx,
                         |this, window, cx| {
                             this.open_menu = None;
@@ -288,9 +314,10 @@ impl SashikiApp {
                         },
                     ))
                     .child(Self::render_menu_separator())
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Quit",
                         Some("Alt+F4"),
+                        1,
                         cx,
                         |this, _, cx| {
                             this.open_menu = None;
@@ -300,9 +327,10 @@ impl SashikiApp {
             }
             MenuId::File => {
                 dropdown = dropdown
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Open Folder...",
                         Some("Ctrl+O"),
+                        0,
                         cx,
                         |this, _, cx| {
                             this.open_menu = None;
@@ -325,18 +353,20 @@ impl SashikiApp {
                             .detach();
                         },
                     ))
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Commit...",
                         Some("Ctrl+Shift+M"),
+                        1,
                         cx,
                         |this, window, cx| {
                             this.open_menu = None;
                             this.open_commit_dialog(window, cx);
                         },
                     ))
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Stash...",
                         Some("Ctrl+Shift+H"),
+                        2,
                         cx,
                         |this, window, cx| {
                             this.open_menu = None;
@@ -346,9 +376,10 @@ impl SashikiApp {
             }
             MenuId::View => {
                 dropdown = dropdown
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Toggle Sidebar",
                         Some("Ctrl+B"),
+                        0,
                         cx,
                         |this, _, cx| {
                             this.open_menu = None;
@@ -356,9 +387,10 @@ impl SashikiApp {
                             cx.notify();
                         },
                     ))
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Toggle File List",
                         Some("Ctrl+E"),
+                        1,
                         cx,
                         |this, _, cx| {
                             this.open_menu = None;
@@ -366,9 +398,10 @@ impl SashikiApp {
                             cx.notify();
                         },
                     ))
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Toggle Parallel",
                         Some("Ctrl+P"),
+                        2,
                         cx,
                         |this, _, cx| {
                             this.open_menu = None;
@@ -376,9 +409,10 @@ impl SashikiApp {
                             cx.notify();
                         },
                     ))
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Toggle Verify Terminal",
                         Some("Ctrl+T"),
+                        3,
                         cx,
                         |this, _, cx| {
                             this.open_menu = None;
@@ -391,9 +425,10 @@ impl SashikiApp {
                         },
                     ))
                     .child(Self::render_menu_separator())
-                    .child(Self::render_menu_item(
+                    .child(self.render_menu_item_indexed(
                         "Refresh All",
                         Some("Ctrl+R"),
+                        4,
                         cx,
                         |this, _, cx| {
                             this.open_menu = None;
@@ -408,53 +443,193 @@ impl SashikiApp {
         dropdown
     }
 
-    fn render_menu_item(
+    fn render_menu_item_indexed(
+        &self,
         label: &str,
         shortcut: Option<&str>,
+        item_index: usize,
         cx: &Context<Self>,
         handler: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> impl IntoElement {
         let label_owned = label.to_string();
         let shortcut_owned = shortcut.map(|s| s.to_string());
+        let is_focused = self.menu_focused_item == item_index;
 
         div()
             .id(label_owned.clone())
             .w_full()
             .px_3()
-            .py_1()
+            .min_h(px(28.0))
             .flex()
             .items_center()
             .justify_between()
             .cursor_pointer()
+            .when(is_focused, |el| el.bg(rgb(BG_SURFACE1)))
             .hover(|this| this.bg(rgb(BG_SURFACE1)))
-            .text_xs()
+            .text_sm()
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                if this.menu_focused_item != item_index {
+                    this.menu_focused_item = item_index;
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(move |this, _, window, cx| {
                 handler(this, window, cx);
             }))
             .child(div().text_color(rgb(TEXT)).child(label_owned))
             .when_some(shortcut_owned, |this, sc| {
-                this.child(div().ml_4().text_color(rgb(TEXT_MUTED)).child(sc))
+                this.child(div().ml_4().text_color(rgb(TEXT_MUTED)).text_xs().child(sc))
             })
+    }
+
+    fn execute_menu_item(
+        &mut self,
+        menu_id: MenuId,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_menu = None;
+        self.menu_focused_item = 0;
+
+        match menu_id {
+            MenuId::App => match index {
+                0 => {
+                    let gi = self.session_manager.active_group_index();
+                    self.open_template_settings(gi, window, cx);
+                }
+                1 => cx.quit(),
+                _ => {}
+            },
+            MenuId::File => match index {
+                0 => {
+                    cx.notify();
+                    let paths_receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+                        files: false,
+                        directories: true,
+                        multiple: false,
+                        prompt: None,
+                    });
+                    cx.spawn(async move |entity, cx| {
+                        if let Ok(Ok(Some(paths))) = paths_receiver.await {
+                            if let Some(path) = paths.into_iter().next() {
+                                let _ = entity.update(cx, |app, cx| {
+                                    app.open_project(path, cx);
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                1 => self.open_commit_dialog(window, cx),
+                2 => self.open_stash_dialog(window, cx),
+                _ => {}
+            },
+            MenuId::View => match index {
+                0 => {
+                    self.show_sidebar = !self.show_sidebar;
+                    cx.notify();
+                }
+                1 => {
+                    self.show_file_list = !self.show_file_list;
+                    cx.notify();
+                }
+                2 => {
+                    self.session_manager.toggle_layout_mode();
+                    cx.notify();
+                }
+                3 => {
+                    self.show_verify_terminal = !self.show_verify_terminal;
+                    if self.show_verify_terminal {
+                        self.session_manager
+                            .ensure_active_session_terminal_count(2, cx);
+                    }
+                    cx.notify();
+                }
+                4 => {
+                    self.refresh_worktrees(cx);
+                    self.refresh_file_list_async(cx);
+                    cx.notify();
+                }
+                _ => {}
+            },
+        }
     }
 
     fn render_menu_separator() -> impl IntoElement {
         div().my_1().mx_2().h_px().bg(rgb(BG_SURFACE1))
     }
 
+    fn menu_item_count(menu_id: MenuId) -> usize {
+        match menu_id {
+            MenuId::App => 2,  // Template Settings, Quit (separator not counted)
+            MenuId::File => 3, // Open Folder, Commit, Stash
+            MenuId::View => 5, // Toggle Sidebar/FileList/Parallel/VerifyTerminal, Refresh All
+        }
+    }
+
     /// Full-screen overlay with backdrop + positioned dropdown.
     fn render_menu_overlay(&self, cx: &Context<Self>) -> impl IntoElement {
         let menu_id = self.open_menu.unwrap();
-        // Approximate horizontal offset for each menu button
         let left_px = match menu_id {
             MenuId::App => gpui::px(8.),
-            MenuId::File => gpui::px(68.),
-            MenuId::View => gpui::px(108.),
+            MenuId::File => gpui::px(78.),
+            MenuId::View => gpui::px(118.),
         };
 
         div()
             .id("menu-overlay")
+            .track_focus(&self.menu_focus)
             .absolute()
             .inset_0()
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                let key = &event.keystroke.key;
+                let Some(menu_id) = this.open_menu else {
+                    return;
+                };
+                let count = Self::menu_item_count(menu_id);
+
+                match key.as_str() {
+                    "escape" => {
+                        this.open_menu = None;
+                        this.menu_focused_item = 0;
+                        cx.notify();
+                    }
+                    "down" => {
+                        this.menu_focused_item =
+                            (this.menu_focused_item + 1).min(count.saturating_sub(1));
+                        cx.notify();
+                    }
+                    "up" => {
+                        this.menu_focused_item = this.menu_focused_item.saturating_sub(1);
+                        cx.notify();
+                    }
+                    "right" => {
+                        let next = match menu_id {
+                            MenuId::App => MenuId::File,
+                            MenuId::File => MenuId::View,
+                            MenuId::View => MenuId::App,
+                        };
+                        this.open_menu = Some(next);
+                        this.menu_focused_item = 0;
+                        cx.notify();
+                    }
+                    "left" => {
+                        let prev = match menu_id {
+                            MenuId::App => MenuId::View,
+                            MenuId::File => MenuId::App,
+                            MenuId::View => MenuId::File,
+                        };
+                        this.open_menu = Some(prev);
+                        this.menu_focused_item = 0;
+                        cx.notify();
+                    }
+                    "enter" => {
+                        this.execute_menu_item(menu_id, this.menu_focused_item, window, cx);
+                    }
+                    _ => {}
+                }
+            }))
             .child(
                 div()
                     .id("menu-backdrop")
@@ -464,6 +639,7 @@ impl SashikiApp {
                         gpui::MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
                             this.open_menu = None;
+                            this.menu_focused_item = 0;
                             cx.notify();
                         }),
                     ),
@@ -573,7 +749,7 @@ impl SashikiApp {
                 _ => "resize-v",
             })
             .h_full()
-            .w(px(4.0))
+            .w(px(12.0))
             .flex_shrink_0()
             .cursor_col_resize()
             .hover(|el| el.bg(rgb(BLUE)))
@@ -605,7 +781,7 @@ impl SashikiApp {
         div()
             .id("resize-fileview-terminal")
             .w_full()
-            .h(px(4.0))
+            .h(px(12.0))
             .flex_shrink_0()
             .cursor_row_resize()
             .hover(|el| el.bg(rgb(BLUE)))

@@ -2,11 +2,13 @@
 
 use crate::app::ResizeDrag;
 use crate::app::SashikiApp;
+use crate::icon;
 use crate::session::{LayoutMode, SessionStatus};
 use crate::theme::*;
 use crate::ui::{render_locked_badge, render_main_badge};
 use gpui::{
-    AnyElement, Context, DefiniteLength, IntoElement, ParentElement, Styled, div, prelude::*, rgb,
+    AnyElement, Context, DefiniteLength, IntoElement, ParentElement, Styled, div, prelude::*, px,
+    rgb,
 };
 
 /// Properties for rendering a terminal header
@@ -317,12 +319,39 @@ impl SashikiApp {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when_some(branch, |el, branch_name| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    icon::git_branch()
+                                        .size(px(12.0))
+                                        .text_color(rgb(TEXT_MUTED)),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(TEXT_MUTED))
+                                        .text_xs()
+                                        .child(branch_name),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_color(rgb(TEXT_MUTED))
+                            .text_xs()
+                            .max_w_48()
+                            .truncate()
+                            .child(path_display),
+                    )
                     .when(show_verify_button, |el| {
                         el.child(
                             div()
                                 .id("toggle-verify-btn")
-                                .px_2()
-                                .py_1()
+                                .flex_shrink_0()
+                                .size(px(24.0))
                                 .cursor_pointer()
                                 .rounded_sm()
                                 .bg(if verify_active {
@@ -330,13 +359,10 @@ impl SashikiApp {
                                 } else {
                                     rgb(BG_SURFACE0)
                                 })
-                                .text_color(if verify_active {
-                                    rgb(BG_BASE)
-                                } else {
-                                    rgb(TEXT_MUTED)
-                                })
                                 .hover(|el| el.bg(rgb(BG_SURFACE2)))
-                                .text_xs()
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.show_verify_terminal = !this.show_verify_terminal;
                                     if this.show_verify_terminal {
@@ -345,25 +371,17 @@ impl SashikiApp {
                                     }
                                     cx.notify();
                                 }))
-                                .child("Verify"),
+                                .child(
+                                    icon::plus()
+                                        .size(px(14.0))
+                                        .text_color(if verify_active {
+                                            rgb(BG_BASE)
+                                        } else {
+                                            rgb(TEXT_MUTED)
+                                        }),
+                                ),
                         )
-                    })
-                    .when_some(branch, |el, branch_name| {
-                        el.child(
-                            div()
-                                .text_color(rgb(TEXT_MUTED))
-                                .text_xs()
-                                .child(format!("⎇ {}", branch_name)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_color(rgb(BG_SURFACE1))
-                            .text_xs()
-                            .max_w_48()
-                            .truncate()
-                            .child(path_display),
-                    ),
+                    }),
             )
     }
 }

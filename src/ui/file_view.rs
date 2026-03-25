@@ -5,10 +5,10 @@ use crate::highlight::{HighlightedDoc, HighlightedLine};
 use crate::theme::*;
 use crate::ui::ChangeSection;
 use gpui::{
-    AnyElement, App, Context, DefiniteLength, EventEmitter, FocusHandle, Focusable,
-    HighlightStyle, Hsla, InteractiveText, IntoElement, MouseButton, ParentElement, Render,
-    ScrollHandle, ScrollStrategy, Stateful, Styled, StyledText, UniformListScrollHandle, Window,
-    div, prelude::*, px, rgb, rgba, uniform_list,
+    AnyElement, App, Context, DefiniteLength, EventEmitter, FocusHandle, Focusable, HighlightStyle,
+    Hsla, InteractiveText, IntoElement, MouseButton, ParentElement, Render, ScrollHandle,
+    ScrollStrategy, Stateful, Styled, StyledText, UniformListScrollHandle, Window, div, prelude::*,
+    px, rgb, rgba, uniform_list,
 };
 use std::ops::Range;
 use std::path::PathBuf;
@@ -87,8 +87,14 @@ enum DiffLineType {
 #[derive(Debug, Clone)]
 enum SplitRow {
     HunkHeader(String),
-    CollapseInfo { hidden_count: usize, collapse_id: usize },
-    Line { left: SplitDiffLine, right: SplitDiffLine },
+    CollapseInfo {
+        hidden_count: usize,
+        collapse_id: usize,
+    },
+    Line {
+        left: SplitDiffLine,
+        right: SplitDiffLine,
+    },
 }
 
 /// Line info for inline diff view
@@ -113,7 +119,10 @@ enum InlineChangeType {
 #[derive(Debug, Clone)]
 enum InlineRow {
     HunkHeader(String),
-    CollapseInfo { hidden_count: usize, collapse_id: usize },
+    CollapseInfo {
+        hidden_count: usize,
+        collapse_id: usize,
+    },
     Line(InlineDiffLine),
 }
 
@@ -391,7 +400,6 @@ impl FileView {
         (added, removed)
     }
 
-
     pub fn close(&mut self) {
         self.file_path = None;
         self.content.clear();
@@ -646,7 +654,10 @@ impl FileView {
                         next_old += 1;
                     }
                 } else {
-                    rows.push(SplitRow::CollapseInfo { hidden_count: hidden, collapse_id: cid });
+                    rows.push(SplitRow::CollapseInfo {
+                        hidden_count: hidden,
+                        collapse_id: cid,
+                    });
                 }
                 next_new = ctx_start;
                 if !self.expanded_collapses.contains(&cid) {
@@ -738,7 +749,9 @@ impl FileView {
                 .get(hunk_idx + 1)
                 .map(|h| h.new_start.saturating_sub(CONTEXT).max(1))
                 .unwrap_or(total_lines + 1);
-            let ctx_end = (next_new + CONTEXT - 1).min(next_hunk_ctx_start - 1).min(total_lines);
+            let ctx_end = (next_new + CONTEXT - 1)
+                .min(next_hunk_ctx_start - 1)
+                .min(total_lines);
             while next_new <= ctx_end {
                 let content = content_lines.get(next_new - 1).unwrap_or(&"").to_string();
                 rows.push(SplitRow::Line {
@@ -788,7 +801,10 @@ impl FileView {
                     next_old += 1;
                 }
             } else {
-                rows.push(SplitRow::CollapseInfo { hidden_count: hidden, collapse_id: cid });
+                rows.push(SplitRow::CollapseInfo {
+                    hidden_count: hidden,
+                    collapse_id: cid,
+                });
             }
         }
 
@@ -888,7 +904,10 @@ impl FileView {
                         }));
                     }
                 } else {
-                    rows.push(InlineRow::CollapseInfo { hidden_count: hidden, collapse_id: cid });
+                    rows.push(InlineRow::CollapseInfo {
+                        hidden_count: hidden,
+                        collapse_id: cid,
+                    });
                 }
                 next_new = ctx_start;
                 next_old += hidden;
@@ -967,8 +986,9 @@ impl FileView {
                     }
                     _ => {
                         flush_inline(&mut pending_removes, &mut pending_adds, &mut rows);
-                        let line_content =
-                            content_lines.get(next_new - 1).map_or(content.as_str(), |v| v);
+                        let line_content = content_lines
+                            .get(next_new - 1)
+                            .map_or(content.as_str(), |v| v);
                         rows.push(InlineRow::Line(InlineDiffLine {
                             line_num: Some(next_new),
                             old_line_num: Some(next_old),
@@ -988,7 +1008,9 @@ impl FileView {
                 .get(hunk_idx + 1)
                 .map(|h| h.new_start.saturating_sub(CONTEXT).max(1))
                 .unwrap_or(total_lines + 1);
-            let ctx_end = (next_new + CONTEXT - 1).min(next_hunk_ctx_start - 1).min(total_lines);
+            let ctx_end = (next_new + CONTEXT - 1)
+                .min(next_hunk_ctx_start - 1)
+                .min(total_lines);
             while next_new <= ctx_end {
                 let content = content_lines.get(next_new - 1).unwrap_or(&"").to_string();
                 rows.push(InlineRow::Line(InlineDiffLine {
@@ -1020,7 +1042,10 @@ impl FileView {
                     }));
                 }
             } else {
-                rows.push(InlineRow::CollapseInfo { hidden_count: hidden, collapse_id: cid });
+                rows.push(InlineRow::CollapseInfo {
+                    hidden_count: hidden,
+                    collapse_id: cid,
+                });
             }
         }
 
@@ -1169,15 +1194,16 @@ impl FileView {
         };
         let len = text.len();
 
-        let syntax_spans: Vec<(std::ops::Range<usize>, HighlightStyle)> = if let Some(hl) = highlight_line {
-            hl.spans
-                .iter()
-                .filter(|s| s.range.start < s.range.end && s.range.end <= len)
-                .map(|s| (s.range.clone(), s.style))
-                .collect()
-        } else {
-            vec![]
-        };
+        let syntax_spans: Vec<(std::ops::Range<usize>, HighlightStyle)> =
+            if let Some(hl) = highlight_line {
+                hl.spans
+                    .iter()
+                    .filter(|s| s.range.start < s.range.end && s.range.end <= len)
+                    .map(|s| (s.range.clone(), s.style))
+                    .collect()
+            } else {
+                vec![]
+            };
 
         if char_changes.is_empty() {
             return StyledText::new(text).with_highlights(syntax_spans.into_iter());
@@ -1252,7 +1278,12 @@ impl FileView {
             .items_center()
             .bg(rgb(DIFF_HUNK_HEADER_BG))
             // ガター構造を維持: strip(3px) + old行番号(40px) + new行番号(40px) + prefix(16px)
-            .child(div().w(px(3.0)).flex_shrink_0().bg(rgb(DIFF_HUNK_HEADER_BG)))
+            .child(
+                div()
+                    .w(px(3.0))
+                    .flex_shrink_0()
+                    .bg(rgb(DIFF_HUNK_HEADER_BG)),
+            )
             .child(div().w(px(40.0)).flex_shrink_0())
             .child(div().w(px(40.0)).flex_shrink_0())
             .child(div().w(px(16.0)).flex_shrink_0())
@@ -1268,7 +1299,12 @@ impl FileView {
     }
 
     /// 省略行バナーをレンダリングする（split/inline 共通）。
-    fn render_collapse_row(&self, hidden_count: usize, collapse_id: usize, cx: &mut Context<Self>) -> Stateful<gpui::Div> {
+    fn render_collapse_row(
+        &self,
+        hidden_count: usize,
+        collapse_id: usize,
+        cx: &mut Context<Self>,
+    ) -> Stateful<gpui::Div> {
         div()
             .id(("collapse-row", collapse_id))
             .w_full()
@@ -1374,7 +1410,11 @@ impl FileView {
         let mode = self.mode;
         let has_diff = self.diff_content.is_some();
         let is_diff_view = has_diff && self.is_diff_mode();
-        let (added, removed) = if is_diff_view { self.diff_stats() } else { (0, 0) };
+        let (added, removed) = if is_diff_view {
+            self.diff_stats()
+        } else {
+            (0, 0)
+        };
 
         div()
             .h_8()
@@ -1405,16 +1445,8 @@ impl FileView {
                                 .items_center()
                                 .gap_1()
                                 .text_xs()
-                                .child(
-                                    div()
-                                        .text_color(rgb(GREEN))
-                                        .child(format!("+{added}")),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(rgb(RED))
-                                        .child(format!("-{removed}")),
-                                ),
+                                .child(div().text_color(rgb(GREEN)).child(format!("+{added}")))
+                                .child(div().text_color(rgb(RED)).child(format!("-{removed}"))),
                         )
                     }),
             )
@@ -1435,12 +1467,10 @@ impl FileView {
                                 .hover(|d| d.bg(rgb(BG_SURFACE1)))
                                 .text_xs()
                                 .text_color(rgb(MAUVE))
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.toggle_diff_display_mode();
-                                        cx.notify();
-                                    }),
-                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_diff_display_mode();
+                                    cx.notify();
+                                }))
                                 .child(if mode == FileViewMode::DiffSplit {
                                     "Inline"
                                 } else {
@@ -1572,9 +1602,10 @@ impl FileView {
         let rows = self.cached_inline_rows.clone();
 
         if let Some(target) = self.target_line.take() {
-            if let Some(ix) = rows.iter().position(|row| {
-                matches!(row, InlineRow::Line(l) if l.line_num == Some(target))
-            }) {
+            if let Some(ix) = rows
+                .iter()
+                .position(|row| matches!(row, InlineRow::Line(l) if l.line_num == Some(target)))
+            {
                 self.inline_scroll_handle
                     .scroll_to_item(ix, ScrollStrategy::Top);
             }
@@ -1585,24 +1616,34 @@ impl FileView {
         uniform_list(
             "inline-diff-scroll",
             item_count,
-            cx.processor(|this: &mut Self, range: Range<usize>, _window: &mut Window, cx: &mut Context<Self>| {
-                let rows = this.cached_inline_rows.clone();
-                let highlight_new = this.highlight_new.as_deref();
-                let highlight_old = this.highlight_old.as_deref();
+            cx.processor(
+                |this: &mut Self,
+                 range: Range<usize>,
+                 _window: &mut Window,
+                 cx: &mut Context<Self>| {
+                    let rows = this.cached_inline_rows.clone();
+                    let highlight_new = this.highlight_new.as_deref();
+                    let highlight_old = this.highlight_old.as_deref();
 
-                range
-                    .map(|idx| {
-                        match &rows[idx] {
+                    range
+                        .map(|idx| match &rows[idx] {
                             InlineRow::HunkHeader(text) => {
                                 Self::render_hunk_header_row(text).into_any_element()
                             }
-                            InlineRow::CollapseInfo { hidden_count, collapse_id } => {
-                                this.render_collapse_row(*hidden_count, *collapse_id, cx).into_any_element()
-                            }
+                            InlineRow::CollapseInfo {
+                                hidden_count,
+                                collapse_id,
+                            } => this
+                                .render_collapse_row(*hidden_count, *collapse_id, cx)
+                                .into_any_element(),
                             InlineRow::Line(line) => {
                                 let (bg_color, text_color, opacity) = match line.change_type {
-                                    InlineChangeType::Added => (Some(rgb(DIFF_ADDED_BG)), rgb(TEXT), 1.0),
-                                    InlineChangeType::Deleted => (Some(rgb(DIFF_REMOVED_BG)), rgb(TEXT), 1.0),
+                                    InlineChangeType::Added => {
+                                        (Some(rgb(DIFF_ADDED_BG)), rgb(TEXT), 1.0)
+                                    }
+                                    InlineChangeType::Deleted => {
+                                        (Some(rgb(DIFF_REMOVED_BG)), rgb(TEXT), 1.0)
+                                    }
                                     InlineChangeType::Unchanged => (None, rgb(TEXT), 1.0),
                                 };
                                 let prefix = match line.change_type {
@@ -1626,45 +1667,75 @@ impl FileView {
                                     InlineChangeType::Unchanged => 0,
                                 };
                                 let highlight_line = match line.change_type {
-                                    InlineChangeType::Deleted => Self::highlighted_line_for_number(highlight_old, line.old_line_num),
-                                    _ => Self::highlighted_line_for_number(highlight_new, line.line_num),
+                                    InlineChangeType::Deleted => Self::highlighted_line_for_number(
+                                        highlight_old,
+                                        line.old_line_num,
+                                    ),
+                                    _ => Self::highlighted_line_for_number(
+                                        highlight_new,
+                                        line.line_num,
+                                    ),
                                 };
                                 let char_changes = &line.char_changes;
                                 let content = if !char_changes.is_empty() {
                                     div().pl_2().text_color(text_color).child(
                                         Self::styled_text_with_char_changes(
-                                            &line.content, highlight_line, char_changes, char_highlight_rgba,
+                                            &line.content,
+                                            highlight_line,
+                                            char_changes,
+                                            char_highlight_rgba,
                                         ),
                                     )
                                 } else if line.change_type == InlineChangeType::Deleted {
                                     div().pl_2().text_color(text_color).child(
                                         Self::styled_text_with_char_changes(
-                                            &line.content, highlight_line, &[], char_highlight_rgba,
+                                            &line.content,
+                                            highlight_line,
+                                            &[],
+                                            char_highlight_rgba,
                                         ),
                                     )
-                                } else if let (Some(hl), Some(ln)) = (highlight_line, line.line_num) {
+                                } else if let (Some(hl), Some(ln)) = (highlight_line, line.line_num)
+                                {
                                     div().pl_2().text_color(text_color).child(
-                                        this.render_interactive_text(ln, &line.content, hl, "inline-diff", cx),
+                                        this.render_interactive_text(
+                                            ln,
+                                            &line.content,
+                                            hl,
+                                            "inline-diff",
+                                            cx,
+                                        ),
                                     )
                                 } else {
                                     div().pl_2().text_color(text_color).child(
                                         Self::styled_text_with_char_changes(
-                                            &line.content, None, &[], char_highlight_rgba,
+                                            &line.content,
+                                            None,
+                                            &[],
+                                            char_highlight_rgba,
                                         ),
                                     )
                                 };
 
                                 this.build_diff_row(
-                                    idx, line.line_num, Some(line.old_line_num),
-                                    bg_color, gutter_bg,
-                                    gutter_strip_color, prefix, opacity, content,
-                                    &line.content, cx,
-                                ).into_any_element()
+                                    idx,
+                                    line.line_num,
+                                    Some(line.old_line_num),
+                                    bg_color,
+                                    gutter_bg,
+                                    gutter_strip_color,
+                                    prefix,
+                                    opacity,
+                                    content,
+                                    &line.content,
+                                    cx,
+                                )
+                                .into_any_element()
                             }
-                        }
-                    })
-                    .collect()
-            }),
+                        })
+                        .collect()
+                },
+            ),
         )
         .flex_1()
         .bg(rgb(BG_BASE))
@@ -1780,12 +1851,22 @@ impl FileView {
                                                     .child(div().w(px(3.0)).flex_shrink_0())
                                                     .child(div().w(px(40.0)).flex_shrink_0())
                                                     .child(div().w(px(16.0)).flex_shrink_0())
-                                                    .child(div().flex_1().pl_2().text_xs()
-                                                        .font_family(MONOSPACE_FONT)
-                                                        .text_color(rgb(DIFF_HUNK_HEADER_FG))
-                                                        .child(text.clone())),
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .pl_2()
+                                                            .text_xs()
+                                                            .font_family(MONOSPACE_FONT)
+                                                            .text_color(rgb(DIFF_HUNK_HEADER_FG))
+                                                            .child(text.clone()),
+                                                    ),
                                             )
-                                            .child(div().w(px(4.0)).flex_shrink_0().bg(rgb(BG_SURFACE0)))
+                                            .child(
+                                                div()
+                                                    .w(px(4.0))
+                                                    .flex_shrink_0()
+                                                    .bg(rgb(BG_SURFACE0)),
+                                            )
                                             .child(
                                                 div()
                                                     .flex_1()
@@ -1796,14 +1877,22 @@ impl FileView {
                                                     .child(div().w(px(3.0)).flex_shrink_0())
                                                     .child(div().w(px(40.0)).flex_shrink_0())
                                                     .child(div().w(px(16.0)).flex_shrink_0())
-                                                    .child(div().flex_1().pl_2().text_xs()
-                                                        .font_family(MONOSPACE_FONT)
-                                                        .text_color(rgb(DIFF_HUNK_HEADER_FG))
-                                                        .child(text.clone())),
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .pl_2()
+                                                            .text_xs()
+                                                            .font_family(MONOSPACE_FONT)
+                                                            .text_color(rgb(DIFF_HUNK_HEADER_FG))
+                                                            .child(text.clone()),
+                                                    ),
                                             )
                                             .into_any_element()
                                     }
-                                    SplitRow::CollapseInfo { hidden_count, collapse_id } => {
+                                    SplitRow::CollapseInfo {
+                                        hidden_count,
+                                        collapse_id,
+                                    } => {
                                         let cid = *collapse_id;
                                         // ガター構造: strip(3px) + line_num(40px) + prefix(16px) + content
                                         div()
@@ -1835,13 +1924,34 @@ impl FileView {
                                                     .child(div().w(px(40.0)).flex_shrink_0())
                                                     .child(div().w(px(16.0)).flex_shrink_0())
                                                     .child(
-                                                        div().flex_1().pl_2().flex().items_center().gap_1().text_xs()
-                                                            .child(div().text_color(rgb(BLUE)).child("⊕"))
-                                                            .child(div().text_color(rgb(TEXT_MUTED))
-                                                                .child(format!("{} hidden lines", hidden_count))),
+                                                        div()
+                                                            .flex_1()
+                                                            .pl_2()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .text_xs()
+                                                            .child(
+                                                                div()
+                                                                    .text_color(rgb(BLUE))
+                                                                    .child("⊕"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_color(rgb(TEXT_MUTED))
+                                                                    .child(format!(
+                                                                        "{} hidden lines",
+                                                                        hidden_count
+                                                                    )),
+                                                            ),
                                                     ),
                                             )
-                                            .child(div().w(px(4.0)).flex_shrink_0().bg(rgb(BG_SURFACE0)))
+                                            .child(
+                                                div()
+                                                    .w(px(4.0))
+                                                    .flex_shrink_0()
+                                                    .bg(rgb(BG_SURFACE0)),
+                                            )
                                             .child(
                                                 div()
                                                     .flex_1()
@@ -1853,53 +1963,63 @@ impl FileView {
                                                     .child(div().w(px(40.0)).flex_shrink_0())
                                                     .child(div().w(px(16.0)).flex_shrink_0())
                                                     .child(
-                                                        div().flex_1().pl_2().flex().items_center().gap_1().text_xs()
-                                                            .child(div().text_color(rgb(BLUE)).child("⊕"))
-                                                            .child(div().text_color(rgb(TEXT_MUTED))
-                                                                .child(format!("{} hidden lines", hidden_count))),
+                                                        div()
+                                                            .flex_1()
+                                                            .pl_2()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_1()
+                                                            .text_xs()
+                                                            .child(
+                                                                div()
+                                                                    .text_color(rgb(BLUE))
+                                                                    .child("⊕"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_color(rgb(TEXT_MUTED))
+                                                                    .child(format!(
+                                                                        "{} hidden lines",
+                                                                        hidden_count
+                                                                    )),
+                                                            ),
                                                     ),
                                             )
                                             .into_any_element()
                                     }
-                                    SplitRow::Line { left, right } => {
-                                        div()
-                                            .w_full()
-                                            .h(px(20.0))
-                                            .relative()
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .left_0()
-                                                    .top_0()
-                                                    .bottom_0()
-                                                    .w(DefiniteLength::Fraction(ratio))
-                                                    .overflow_hidden()
-                                                    .child(
-                                                        Self::render_split_left_line(
-                                                            left,
-                                                            highlight_old,
-                                                        ),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .top_0()
-                                                    .bottom_0()
-                                                    .right_0()
-                                                    .w(DefiniteLength::Fraction(1.0 - ratio))
-                                                    .overflow_hidden()
-                                                    .child(
-                                                        this.render_split_right_line(
-                                                            idx,
-                                                            right,
-                                                            highlight_new,
-                                                            cx,
-                                                        ),
-                                                    ),
-                                            )
-                                            .into_any_element()
-                                    }
+                                    SplitRow::Line { left, right } => div()
+                                        .w_full()
+                                        .h(px(20.0))
+                                        .relative()
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .left_0()
+                                                .top_0()
+                                                .bottom_0()
+                                                .w(DefiniteLength::Fraction(ratio))
+                                                .overflow_hidden()
+                                                .child(Self::render_split_left_line(
+                                                    left,
+                                                    highlight_old,
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .bottom_0()
+                                                .right_0()
+                                                .w(DefiniteLength::Fraction(1.0 - ratio))
+                                                .overflow_hidden()
+                                                .child(this.render_split_right_line(
+                                                    idx,
+                                                    right,
+                                                    highlight_new,
+                                                    cx,
+                                                )),
+                                        )
+                                        .into_any_element(),
                                 })
                                 .collect()
                         },
@@ -2016,9 +2136,8 @@ impl FileView {
         let is_hovered_hunk = line_hunk_idx
             .zip(hovered_hunk_idx)
             .is_some_and(|(a, b)| a == b);
-        let is_untracked =
-            matches!(self.current_change_type, Some(ChangeType::Added))
-                && matches!(self.current_change_section, Some(ChangeSection::Unstaged));
+        let is_untracked = matches!(self.current_change_type, Some(ChangeType::Added))
+            && matches!(self.current_change_section, Some(ChangeSection::Unstaged));
         let show_hunk_highlight = is_hovered_hunk && !is_untracked;
 
         let content_text_rc: Rc<str> = Rc::from(content_text);
@@ -2071,23 +2190,18 @@ impl FileView {
                     .bg(gutter_bg)
                     .text_color(rgb(TEXT_MUTED))
                     .when(line_num.is_some(), |el| {
-                        el.cursor_pointer()
-                            .hover(|el| el.text_color(rgb(BLUE)))
+                        el.cursor_pointer().hover(|el| el.text_color(rgb(BLUE)))
                     })
                     // 右クリック行番号: path:line をターミナルに送信
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(
-                            move |this, _, _, cx| {
-                                if let Some(num) = line_num {
-                                    if let Some(ref path) = this.display_path {
-                                        cx.emit(SendToTerminalEvent(
-                                            format!("`{}:{}`", path, num),
-                                        ));
-                                    }
+                        cx.listener(move |this, _, _, cx| {
+                            if let Some(num) = line_num {
+                                if let Some(ref path) = this.display_path {
+                                    cx.emit(SendToTerminalEvent(format!("`{}:{}`", path, num)));
                                 }
-                            },
-                        ),
+                            }
+                        }),
                     )
                     .child(line_num.map(|n| n.to_string()).unwrap_or_default()),
             )
@@ -2135,8 +2249,6 @@ impl FileView {
                     .child(content),
             )
     }
-
-
 
     /// Split diff の右側（After/追加）パネルの1行をレンダリングする。
     /// インタラクティブ操作（ステージング・go-to-definition）を含む。
@@ -2190,7 +2302,10 @@ impl FileView {
                     .pl_2()
                     .text_color(text_color)
                     .child(Self::styled_text_with_char_changes(
-                        &line.content, highlighted_line, &[], 0,
+                        &line.content,
+                        highlighted_line,
+                        &[],
+                        0,
                     ))
             }
         } else {
@@ -2206,8 +2321,17 @@ impl FileView {
         };
 
         self.build_diff_row(
-            idx, line_num, None, bg_color, gutter_bg, gutter_strip_color, prefix, 1.0,
-            content_element, &line.content, cx,
+            idx,
+            line_num,
+            None,
+            bg_color,
+            gutter_bg,
+            gutter_strip_color,
+            prefix,
+            1.0,
+            content_element,
+            &line.content,
+            cx,
         )
         .into_any_element()
     }
@@ -2249,7 +2373,6 @@ impl FileView {
     fn handle_diff_resize_end(&mut self) {
         self.diff_resize_drag = None;
     }
-
 }
 
 impl Focusable for FileView {

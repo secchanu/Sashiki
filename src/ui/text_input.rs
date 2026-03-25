@@ -4,8 +4,10 @@
 //! from `gpui/examples/input.rs`. The entity handles its own text, cursor, selection, and
 //! IME preedit state independently.
 
-use gpui::{Bounds, Context, EntityInputHandler, HighlightStyle, Hsla, Pixels, StyledText,
-    UTF16Selection, Window, rgba};
+use gpui::{
+    Bounds, Context, EntityInputHandler, HighlightStyle, Hsla, Pixels, Point, Size, StyledText,
+    UTF16Selection, Window, px, rgba,
+};
 
 /// Text input state for a single dialog field.
 ///
@@ -16,6 +18,9 @@ pub struct TextInput {
     pub cursor: usize,
     pub selection_anchor: Option<usize>,
     pub preedit: String,
+    /// Bounds of the visible input field, updated each frame by the dialog's
+    /// inner canvas. Used by `bounds_for_range` to position the IME candidate window.
+    pub input_bounds: Option<Bounds<Pixels>>,
 }
 
 impl TextInput {
@@ -25,6 +30,7 @@ impl TextInput {
             cursor: 0,
             selection_anchor: None,
             preedit: String::new(),
+            input_bounds: None,
         }
     }
 
@@ -215,7 +221,12 @@ impl TextInput {
 
     /// Render the input text with cursor marker (`|`), selection highlight, and IME preedit.
     pub fn render_styled(&self) -> StyledText {
-        render_text_with_preedit(&self.text, self.cursor, self.selection_anchor, &self.preedit)
+        render_text_with_preedit(
+            &self.text,
+            self.cursor,
+            self.selection_anchor,
+            &self.preedit,
+        )
     }
 }
 
@@ -248,9 +259,15 @@ impl EntityInputHandler for TextInput {
             } else {
                 (cursor_utf16, anchor_utf16, true)
             };
-            Some(UTF16Selection { range: start..end, reversed })
+            Some(UTF16Selection {
+                range: start..end,
+                reversed,
+            })
         } else {
-            Some(UTF16Selection { range: cursor_utf16..cursor_utf16, reversed: false })
+            Some(UTF16Selection {
+                range: cursor_utf16..cursor_utf16,
+                reversed: false,
+            })
         }
     }
 
@@ -300,13 +317,35 @@ impl EntityInputHandler for TextInput {
 
     fn bounds_for_range(
         &mut self,
-        _range_utf16: std::ops::Range<usize>,
+        range_utf16: std::ops::Range<usize>,
         _element_bounds: Bounds<Pixels>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // IME candidate window appears at a platform-default position.
-        None
+        let ib = self.input_bounds?;
+        // Estimate character width from the input font (text_sm ≈ 14px, mono ≈ 8.4px)
+        let font_size = px(14.0);
+        let font_id = window.text_system().resolve_font(
+            &gpui::TextStyle {
+                font_family: crate::theme::MONOSPACE_FONT.into(),
+                font_size: font_size.into(),
+                ..Default::default()
+            }
+            .font(),
+        );
+        let char_width = window
+            .text_system()
+            .advance(font_id, font_size, 'M')
+            .map(|s| s.width)
+            .unwrap_or(px(8.4));
+        let offset_x = char_width * range_utf16.start as f32;
+        Some(Bounds {
+            origin: Point::new(ib.origin.x + offset_x, ib.origin.y),
+            size: Size {
+                width: px(1.0),
+                height: ib.size.height,
+            },
+        })
     }
 
     fn character_index_for_point(

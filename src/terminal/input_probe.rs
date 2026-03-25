@@ -385,15 +385,30 @@ mod imp {
                 SetWindowTextW(edit_hwnd, utf16.as_ptr());
                 SendMessageW(edit_hwnd, EM_SETSEL_MSG, 0, utf16_len as isize);
                 NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, edit_hwnd, OBJID_CLIENT, 0);
-                NotifyWinEvent(EVENT_OBJECT_TEXTSELECTIONCHANGED, edit_hwnd, OBJID_CLIENT, 0);
+                NotifyWinEvent(
+                    EVENT_OBJECT_TEXTSELECTIONCHANGED,
+                    edit_hwnd,
+                    OBJID_CLIENT,
+                    0,
+                );
                 NotifyWinEvent(EVENT_OBJECT_LOCATIONCHANGE, edit_hwnd, OBJID_CARET, 0);
                 // Notify host after mirror state has been committed.
                 NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, hwnd, OBJID_CLIENT, 0);
                 NotifyWinEvent(EVENT_OBJECT_TEXTSELECTIONCHANGED, hwnd, OBJID_CLIENT, 0);
                 NotifyWinEvent(EVENT_OBJECT_LOCATIONCHANGE, hwnd, OBJID_CARET, 0);
                 // Some automation clients subscribe to child-id specific updates.
-                NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, hwnd, OBJID_CLIENT, MIRROR_EDIT_CHILD_ID as i32);
-                NotifyWinEvent(EVENT_OBJECT_TEXTSELECTIONCHANGED, hwnd, OBJID_CLIENT, MIRROR_EDIT_CHILD_ID as i32);
+                NotifyWinEvent(
+                    EVENT_OBJECT_VALUECHANGE,
+                    hwnd,
+                    OBJID_CLIENT,
+                    MIRROR_EDIT_CHILD_ID as i32,
+                );
+                NotifyWinEvent(
+                    EVENT_OBJECT_TEXTSELECTIONCHANGED,
+                    hwnd,
+                    OBJID_CLIENT,
+                    MIRROR_EDIT_CHILD_ID as i32,
+                );
                 let wparam =
                     ((EN_CHANGE as usize) << 16) | ((MIRROR_EDIT_CHILD_ID as usize) & 0xFFFF);
                 SendMessageW(hwnd, WM_COMMAND, wparam, edit_hwnd as isize);

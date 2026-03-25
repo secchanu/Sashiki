@@ -3,12 +3,14 @@
 use crate::app::SashikiApp;
 use crate::git::StashMode;
 use crate::theme::*;
-use crate::ui::text_input::{normalize_single_line_text, insert_caret_marker, selection_ranges_in_display_text, selection_highlight_style};
 use crate::ui::TextInput;
+use crate::ui::text_input::{
+    insert_caret_marker, normalize_single_line_text, selection_highlight_style,
+    selection_ranges_in_display_text,
+};
 use gpui::{
-    AnyElement, ClipboardItem, Context, ElementInputHandler, Entity, HighlightStyle,
-    IntoElement, KeyDownEvent, ParentElement, Styled, StyledText, canvas, div, prelude::*, px,
-    rgb, rgba,
+    AnyElement, ClipboardItem, Context, ElementInputHandler, Entity, HighlightStyle, IntoElement,
+    KeyDownEvent, ParentElement, Styled, StyledText, canvas, div, prelude::*, px, rgb, rgba,
 };
 
 impl SashikiApp {
@@ -151,7 +153,8 @@ impl SashikiApp {
                                             .text_sm()
                                             .child("Enter branch name:"),
                                     )
-                                    .child(
+                                    .child({
+                                        let bounds_entity = self.create_input.clone();
                                         div()
                                             .id("branch-input")
                                             .w_full()
@@ -164,8 +167,22 @@ impl SashikiApp {
                                             .cursor_text()
                                             .text_color(rgb(TEXT))
                                             .text_sm()
-                                            .child(styled),
-                                    )
+                                            .relative()
+                                            .child(styled)
+                                            .child(
+                                                canvas(
+                                                    move |bounds, _w, cx| {
+                                                        bounds_entity.update(cx, |ti, _| {
+                                                            ti.input_bounds = Some(bounds);
+                                                        });
+                                                        bounds
+                                                    },
+                                                    |_, _, _, _| {},
+                                                )
+                                                .absolute()
+                                                .inset_0(),
+                                            )
+                                    })
                                     .child(
                                         div()
                                             .text_color(rgb(TEXT_MUTED))
@@ -335,7 +352,8 @@ impl SashikiApp {
                                                 if this.commit_amend_mode {
                                                     // amendモード解除: メッセージをクリア
                                                     this.commit_amend_mode = false;
-                                                    this.commit_input.update(cx, |input, _| input.clear());
+                                                    this.commit_input
+                                                        .update(cx, |input, _| input.clear());
                                                     cx.notify();
                                                 } else {
                                                     // amendモードへ: 最後のコミットメッセージをプリフィル
@@ -357,7 +375,8 @@ impl SashikiApp {
                                             .text_sm()
                                             .child("Commit message"),
                                     )
-                                    .child(
+                                    .child({
+                                        let bounds_entity = self.commit_input.clone();
                                         div()
                                             .id("commit-message-input")
                                             .w_full()
@@ -371,8 +390,22 @@ impl SashikiApp {
                                             .cursor_text()
                                             .text_color(rgb(TEXT))
                                             .text_sm()
-                                            .child(styled),
-                                    )
+                                            .relative()
+                                            .child(styled)
+                                            .child(
+                                                canvas(
+                                                    move |bounds, _w, cx| {
+                                                        bounds_entity.update(cx, |ti, _| {
+                                                            ti.input_bounds = Some(bounds);
+                                                        });
+                                                        bounds
+                                                    },
+                                                    |_, _, _, _| {},
+                                                )
+                                                .absolute()
+                                                .inset_0(),
+                                            )
+                                    })
                                     .child(
                                         div()
                                             .text_color(rgb(TEXT_MUTED))
@@ -548,7 +581,8 @@ impl SashikiApp {
                                             .text_xs()
                                             .child("Create stash (optional message)"),
                                     )
-                                    .child(
+                                    .child({
+                                        let bounds_entity = self.stash_input.clone();
                                         div()
                                             .id("stash-message-input")
                                             .w_full()
@@ -561,8 +595,22 @@ impl SashikiApp {
                                             .cursor_text()
                                             .text_color(rgb(TEXT))
                                             .text_sm()
-                                            .child(styled),
-                                    )
+                                            .relative()
+                                            .child(styled)
+                                            .child(
+                                                canvas(
+                                                    move |bounds, _w, cx| {
+                                                        bounds_entity.update(cx, |ti, _| {
+                                                            ti.input_bounds = Some(bounds);
+                                                        });
+                                                        bounds
+                                                    },
+                                                    |_, _, _, _| {},
+                                                )
+                                                .absolute()
+                                                .inset_0(),
+                                            )
+                                    })
                                     // スタッシュ範囲選択: [All] [Staged] [+Untracked]
                                     .child({
                                         let mode = self.stash_mode;
@@ -1831,16 +1879,25 @@ impl SashikiApp {
     pub fn render_template_settings_dialog(&self, cx: &Context<Self>) -> AnyElement {
         let active_section = self.settings_active_section;
         // Read all section data upfront
-        let inputs: Vec<String> = self.settings_inputs.iter()
+        let inputs: Vec<String> = self
+            .settings_inputs
+            .iter()
             .map(|e| e.read(cx).text().to_string())
             .collect();
-        let cursors: Vec<usize> = self.settings_inputs.iter()
+        let cursors: Vec<usize> = self
+            .settings_inputs
+            .iter()
             .map(|e| e.read(cx).cursor())
             .collect();
-        let selection_anchors: Vec<Option<usize>> = self.settings_inputs.iter()
+        let selection_anchors: Vec<Option<usize>> = self
+            .settings_inputs
+            .iter()
             .map(|e| e.read(cx).selection_anchor())
             .collect();
-        let active_preedit = self.settings_inputs[active_section].read(cx).preedit().to_string();
+        let active_preedit = self.settings_inputs[active_section]
+            .read(cx)
+            .preedit()
+            .to_string();
         let settings_entity = self.settings_inputs[active_section].clone();
         let focus = self.settings_dialog_focus.clone();
         let group_name = self
@@ -2158,7 +2215,12 @@ impl SashikiApp {
                 let base = insert_caret_marker(content, cursor);
                 if !preedit.is_empty() {
                     let cursor_byte = base.find('|').map(|i| i + 1).unwrap_or(base.len());
-                    format!("{}{}{}", &base[..cursor_byte], preedit, &base[cursor_byte..])
+                    format!(
+                        "{}{}{}",
+                        &base[..cursor_byte],
+                        preedit,
+                        &base[cursor_byte..]
+                    )
                 } else {
                     base
                 }

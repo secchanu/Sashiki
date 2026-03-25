@@ -1,6 +1,7 @@
 //! Sidebar rendering for session list
 
 use crate::app::SashikiApp;
+use crate::icon;
 use crate::session::{LayoutMode, SessionGroup};
 use crate::theme::*;
 use crate::ui::{render_locked_badge, render_main_badge};
@@ -96,7 +97,7 @@ impl SashikiApp {
             let group_name_clone = group_name.clone();
             div()
                 .id(format!("group-header-{}", group_index))
-                .h_7()
+                .min_h(px(28.0))
                 .px_2()
                 .flex()
                 .items_center()
@@ -104,24 +105,35 @@ impl SashikiApp {
                 .when(is_active_group, |el| el.bg(rgb(BG_SURFACE0)))
                 .hover(|el| el.bg(rgb(BG_SURFACE1)))
                 .child(
-                    // 展開/折りたたみ矢印（グループ切り替えは発生しない独立クリック領域）
                     div()
                         .id(format!("group-expand-{}", group_index))
-                        .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
+                        .flex_shrink_0()
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .cursor_pointer()
+                        .rounded_sm()
+                        .hover(|el| el.bg(rgb(BG_SURFACE2)))
                         .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, _, cx| {
                             this.session_manager.toggle_group_expanded(group_index);
                             cx.notify();
                         }))
-                        .child(if is_expanded { "▼" } else { "▶" }),
+                        .child(
+                            if is_expanded {
+                                icon::chevron_down()
+                            } else {
+                                icon::chevron_right()
+                            }
+                            .size(px(14.0))
+                            .text_color(rgb(TEXT_MUTED)),
+                        ),
                 )
                 .child(
-                    // グループ名（クリックでグループ切り替え）
                     div()
                         .id(format!("group-name-{}", group_index))
                         .flex_1()
-                        .text_xs()
+                        .text_sm()
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(if is_active_group {
                             rgb(TEXT)
@@ -136,32 +148,37 @@ impl SashikiApp {
                         }))
                         .child(group_name_clone),
                 )
-                // テンプレート設定アイコン
                 .child(
                     div()
                         .id(format!("group-template-{}", group_index))
-                        .px_1()
+                        .flex_shrink_0()
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .cursor_pointer()
-                        .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
-                        .hover(|el| el.text_color(rgb(TEXT)))
+                        .rounded_sm()
+                        .hover(|el| el.bg(rgb(BG_SURFACE2)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_template_settings(group_index, window, cx);
                         }))
-                        .child("⚙"),
+                        .child(icon::settings().size(px(14.0)).text_color(rgb(TEXT_MUTED))),
                 )
                 .child(
                     div()
                         .id(format!("group-close-{}", group_index))
-                        .px_1()
+                        .flex_shrink_0()
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .cursor_pointer()
-                        .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
-                        .hover(|el| el.text_color(rgb(RED)))
+                        .rounded_sm()
+                        .hover(|el| el.bg(rgb(BG_SURFACE2)))
                         .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, _, cx| {
                             this.open_close_group_dialog(group_index, cx);
                         }))
-                        .child("×"),
+                        .child(icon::close().size(px(14.0)).text_color(rgb(TEXT_MUTED))),
                 )
         };
 
@@ -188,7 +205,7 @@ impl SashikiApp {
                         div()
                             .px_4()
                             .py_1()
-                            .text_xs()
+                            .text_sm()
                             .text_color(rgb(TEXT_MUTED))
                             .child("No sessions"),
                     )
@@ -200,18 +217,23 @@ impl SashikiApp {
                             .w_full()
                             .px_3()
                             .py_1()
+                            .min_h(px(28.0))
                             .cursor_pointer()
                             .rounded_sm()
                             .bg(rgb(BG_SURFACE0))
                             .hover(|el| el.bg(rgb(BG_SURFACE1)))
-                            .text_center()
-                            .text_xs()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_1()
+                            .text_sm()
                             .text_color(rgb(GREEN))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.session_manager.switch_group(group_index);
                                 this.open_create_dialog(window, cx);
                             }))
-                            .child("+ New Worktree"),
+                            .child(icon::plus().size(px(14.0)).text_color(rgb(GREEN)))
+                            .child("New Worktree"),
                     ),
                 )
             })
@@ -247,12 +269,12 @@ impl SashikiApp {
             .id(format!("session-{}-{}", group_index, session_index))
             .pl(px(20.0))
             .pr_3()
-            .py_2()
+            .py_1()
+            .min_h(px(32.0))
             .cursor_pointer()
             .when(is_selected, |el| el.bg(rgb(BG_SURFACE0)))
             .hover(|el| el.bg(rgb(BG_SURFACE1)))
             .on_click(cx.listener(move |this, _, window, cx| {
-                // 別グループのセッションをクリックしたらグループを切り替えてからセッションを選択
                 if !is_active_group {
                     this.session_manager.switch_group(group_index);
                 }
@@ -273,19 +295,37 @@ impl SashikiApp {
                 |el| {
                     el.child(
                         div()
-                            .w_4()
-                            .text_center()
-                            .text_xs()
-                            .text_color(if visible_in_parallel {
-                                rgb(BLUE)
-                            } else {
-                                rgb(TEXT_MUTED)
-                            })
-                            .child(if visible_in_parallel { "☑" } else { "☐" }),
+                            .size(px(16.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                if visible_in_parallel {
+                                    icon::check_square()
+                                } else {
+                                    icon::square()
+                                }
+                                .size(px(14.0))
+                                .text_color(
+                                    if visible_in_parallel {
+                                        rgb(BLUE)
+                                    } else {
+                                        rgb(TEXT_MUTED)
+                                    },
+                                ),
+                            ),
                     )
                 },
             )
-            .child(div().w_2().h_2().rounded_full().bg(rgb(color)))
+            .child(
+                div()
+                    .w_2()
+                    .h_2()
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(rgb(color)),
+            )
             .child(self.render_session_name_section(name, branch, is_main, is_locked))
             .when(
                 layout_mode == LayoutMode::Single && is_active_group && !is_main,
@@ -293,15 +333,18 @@ impl SashikiApp {
                     el.child(
                         div()
                             .id(format!("delete-{}-{}", group_index, session_index))
-                            .px_1()
+                            .flex_shrink_0()
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .cursor_pointer()
-                            .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
-                            .hover(|el| el.text_color(rgb(RED)))
+                            .rounded_sm()
+                            .hover(|el| el.bg(rgb(BG_SURFACE2)))
                             .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, _, cx| {
                                 this.open_delete_dialog(session_index, cx);
                             }))
-                            .child("×"),
+                            .child(icon::close().size(px(14.0)).text_color(rgb(TEXT_MUTED))),
                     )
                 },
             )
@@ -314,7 +357,6 @@ impl SashikiApp {
         is_main: bool,
         is_locked: bool,
     ) -> impl IntoElement {
-        // ブランチ名を主テキストとして使用。ブランチ名がない場合（detached HEAD等）はセッション名で代替
         let display_name = branch.unwrap_or(name);
         div()
             .flex_1()
@@ -351,16 +393,21 @@ impl SashikiApp {
                     .w_full()
                     .px_3()
                     .py_1()
+                    .min_h(px(28.0))
                     .cursor_pointer()
                     .rounded_sm()
                     .hover(|el| el.bg(rgb(BG_SURFACE1)))
-                    .text_center()
-                    .text_xs()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .text_sm()
                     .text_color(rgb(TEXT_MUTED))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.on_open_folder(&crate::app::OpenFolder, window, cx);
                     }))
-                    .child("+ Open Project"),
+                    .child(icon::plus().size(px(14.0)).text_color(rgb(TEXT_MUTED)))
+                    .child("Open Project"),
             )
     }
 }

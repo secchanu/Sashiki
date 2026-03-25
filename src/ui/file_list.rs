@@ -2,6 +2,7 @@
 
 use crate::app::SashikiApp;
 use crate::git::{ChangeType, ChangedFile};
+use crate::icon;
 use crate::theme::*;
 use crate::ui::{ChangeInfo, ChangeSection, FileListMode, FileTreeNode, read_dir_shallow};
 use gpui::{
@@ -25,11 +26,20 @@ fn section_title(section: ChangeSection) -> &'static str {
 
 fn render_dir_icons(is_expanded: bool) -> (Div, Div) {
     let arrow = div()
-        .w_3()
-        .text_center()
-        .text_color(rgb(TEXT_MUTED))
-        .text_xs()
-        .child(if is_expanded { "▾" } else { "▸" });
+        .size(px(16.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            if is_expanded {
+                icon::chevron_down()
+            } else {
+                icon::chevron_right()
+            }
+            .size(px(12.0))
+            .text_color(rgb(TEXT_MUTED)),
+        );
     let spacer = div().w_2();
     (arrow, spacer)
 }
@@ -74,27 +84,25 @@ impl SashikiApp {
                     .flex()
                     .items_center()
                     .justify_between()
-                    // 左側: [Changes/Files トグル] + [ツリー/リスト切り替え (Changesのみ)]
                     .child({
                         let is_tree = self.changes_view_is_tree;
                         div()
                             .flex()
                             .items_center()
                             .gap_1()
-                            // Changes / Files トグルボタン (1つ、クリックで切り替え)
-                            // "Changes" が最大幅なので固定幅にしてレイアウトシフトを防ぐ
                             .child(
                                 div()
                                     .id("file-mode-toggle")
-                                    .w(px(56.))
-                                    .py_1()
+                                    .w(px(64.))
+                                    .min_h(px(24.0))
                                     .cursor_pointer()
                                     .rounded_sm()
                                     .bg(rgb(BG_SURFACE0))
                                     .hover(|el| el.bg(rgb(BG_SURFACE1)))
                                     .flex()
+                                    .items_center()
                                     .justify_center()
-                                    .text_xs()
+                                    .text_sm()
                                     .text_color(rgb(TEXT))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.file_list_mode = match this.file_list_mode {
@@ -112,25 +120,32 @@ impl SashikiApp {
                                         "Files"
                                     }),
                             )
-                            // ツリー/リスト切り替えボタン (Changesモード時のみ表示)
                             .when(mode == FileListMode::Changes, |el| {
                                 el.child(
                                     div()
                                         .id("changes-view-toggle")
-                                        .px_1()
-                                        .py_1()
+                                        .flex_shrink_0()
+                                        .size(px(24.0))
                                         .cursor_pointer()
                                         .rounded_sm()
                                         .bg(rgb(BG_SURFACE0))
                                         .hover(|b| b.bg(rgb(BG_SURFACE1)))
-                                        .text_xs()
-                                        .text_color(rgb(TEXT_MUTED))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.changes_view_is_tree = !this.changes_view_is_tree;
                                             cx.notify();
                                         }))
-                                        // ツリー時は「≡」(リストに切り替え)、リスト時は「⊟」(ツリーに切り替え)
-                                        .child(if is_tree { "≡" } else { "⊟" }),
+                                        .child(
+                                            if is_tree {
+                                                icon::list()
+                                            } else {
+                                                icon::tree_view()
+                                            }
+                                            .size(px(14.0))
+                                            .text_color(rgb(TEXT_MUTED)),
+                                        ),
                                 )
                             })
                     })
@@ -140,21 +155,28 @@ impl SashikiApp {
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                // Stash ボタン
                                 .child(
                                     div()
                                         .id("files-stash-button")
-                                        .px_1()
-                                        .py_1()
+                                        .px_2()
+                                        .min_h(px(24.0))
                                         .cursor_pointer()
                                         .rounded_sm()
                                         .bg(rgb(BG_SURFACE0))
                                         .hover(|b| b.bg(rgb(BG_SURFACE1)))
-                                        .text_xs()
+                                        .text_sm()
                                         .text_color(rgb(TEXT_MUTED))
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.open_stash_dialog(window, cx);
                                         }))
+                                        .child(
+                                            icon::stash()
+                                                .size(px(14.0))
+                                                .text_color(rgb(TEXT_MUTED)),
+                                        )
                                         .child("Stash"),
                                 )
                                 // Commit スプリットボタン: [Commit | ▾]
@@ -165,44 +187,53 @@ impl SashikiApp {
                                         .items_center()
                                         .rounded_sm()
                                         .bg(rgb(BG_SURFACE0))
-                                        // Commit テキスト
                                         .child(
                                             div()
                                                 .id("files-commit-button")
                                                 .px_2()
-                                                .py_1()
+                                                .min_h(px(24.0))
                                                 .cursor_pointer()
                                                 .rounded_tl_sm()
                                                 .rounded_bl_sm()
                                                 .hover(|b| b.bg(rgb(BG_SURFACE1)))
-                                                .text_xs()
+                                                .text_sm()
                                                 .text_color(rgb(GREEN))
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
                                                 .on_click(cx.listener(|this, _, window, cx| {
                                                     this.commit_dropdown_open = false;
                                                     this.open_commit_dialog(window, cx);
                                                 }))
+                                                .child(
+                                                    icon::git_commit()
+                                                        .size(px(14.0))
+                                                        .text_color(rgb(GREEN)),
+                                                )
                                                 .child("Commit"),
                                         )
-                                        // セパレータ
-                                        .child(div().w_px().h_3().bg(rgb(BG_SURFACE1)))
-                                        // ▾ ドロップダウントグル
+                                        .child(div().w_px().h_4().bg(rgb(BG_SURFACE1)))
                                         .child(
                                             div()
                                                 .id("files-commit-dropdown-btn")
-                                                .px_1()
-                                                .py_1()
+                                                .size(px(24.0))
                                                 .cursor_pointer()
                                                 .rounded_tr_sm()
                                                 .rounded_br_sm()
                                                 .hover(|b| b.bg(rgb(BG_SURFACE1)))
-                                                .text_xs()
-                                                .text_color(rgb(GREEN))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.commit_dropdown_open =
                                                         !this.commit_dropdown_open;
                                                     cx.notify();
                                                 }))
-                                                .child("▾"),
+                                                .child(
+                                                    icon::chevron_down()
+                                                        .size(px(12.0))
+                                                        .text_color(rgb(GREEN)),
+                                                ),
                                         ),
                                 ),
                         )
@@ -313,11 +344,22 @@ impl SashikiApp {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_color(rgb(TEXT_MUTED))
-                                    .text_xs()
-                                    .child(if collapsed { "▸" } else { "▾" }),
+                                    .size(px(16.0))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        if collapsed {
+                                            icon::chevron_right()
+                                        } else {
+                                            icon::chevron_down()
+                                        }
+                                        .size(px(12.0))
+                                        .text_color(rgb(TEXT_MUTED)),
+                                    ),
                             )
-                            .child(div().text_xs().text_color(rgb(TEXT_SECONDARY)).child(title)),
+                            .child(div().text_sm().text_color(rgb(TEXT_SECONDARY)).child(title)),
                     )
                     .child(
                         // ファイル数 + Stage All / Unstage All ボタン
@@ -333,7 +375,6 @@ impl SashikiApp {
                             )
                             .when(count > 0, |el| {
                                 // ファイル行と同じ順: discard → stage（左から）
-                                let stage_label = if is_staged { "-all" } else { "+all" };
                                 let stage_color = if is_staged { rgb(BLUE) } else { rgb(GREEN) };
                                 let stage_btn_id = format!("section-stage-all-{}", section_id);
                                 // 未ステージセクションのみ: Discard All ボタンを先に配置
@@ -341,16 +382,22 @@ impl SashikiApp {
                                     el.child(
                                         div()
                                             .id("section-discard-all")
-                                            .px_1()
+                                            .flex_shrink_0()
+                                            .size(px(24.0))
                                             .cursor_pointer()
                                             .rounded_sm()
-                                            .text_xs()
-                                            .text_color(rgb(RED))
                                             .hover(|b| b.bg(rgb(BG_SURFACE1)))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.open_discard_all_confirm(cx);
                                             }))
-                                            .child("×all"),
+                                            .child(
+                                                icon::x_circle()
+                                                    .size(px(14.0))
+                                                    .text_color(rgb(RED)),
+                                            ),
                                     )
                                 } else {
                                     el
@@ -358,12 +405,14 @@ impl SashikiApp {
                                 el.child(
                                     div()
                                         .id(stage_btn_id)
-                                        .px_1()
+                                        .flex_shrink_0()
+                                        .size(px(24.0))
                                         .cursor_pointer()
                                         .rounded_sm()
-                                        .text_xs()
-                                        .text_color(stage_color)
                                         .hover(|b| b.bg(rgb(BG_SURFACE1)))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if is_staged {
                                                 this.unstage_all_files(cx);
@@ -371,7 +420,15 @@ impl SashikiApp {
                                                 this.stage_all_files(cx);
                                             }
                                         }))
-                                        .child(stage_label),
+                                        .child(
+                                            if is_staged {
+                                                icon::arrow_down()
+                                            } else {
+                                                icon::arrow_up()
+                                            }
+                                            .size(px(14.0))
+                                            .text_color(stage_color),
+                                        ),
                                 )
                             }),
                     ),
@@ -552,26 +609,27 @@ impl SashikiApp {
                         section_id,
                         discard_path.to_string_lossy()
                     ))
-                    .w_4()
-                    .text_center()
+                    .flex_shrink_0()
+                    .size(px(20.0))
                     .cursor_pointer()
-                    .text_xs()
-                    .text_color(rgb(RED))
-                    .hover(|b| b.rounded_sm().bg(rgb(BG_SURFACE1)).text_color(rgb(RED)))
+                    .rounded_sm()
+                    .hover(|b| b.bg(rgb(BG_SURFACE1)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_discard_confirm(discard_path.clone(), change_type, cx);
                     }))
-                    .child("×")
+                    .child(icon::close().size(px(12.0)).text_color(rgb(RED)))
                     .into_any_element()
             } else {
-                div().w_4().into_any_element()
+                div().w(px(20.0)).flex_shrink_0().into_any_element()
             };
             row.child(discard_btn)
         } else {
             row
         };
 
-        // ステージング (+/-) ボタン: ホバー時のみ表示、スペースは常に確保
         let stage_btn: AnyElement = if is_hovered {
             div()
                 .id(format!(
@@ -579,23 +637,29 @@ impl SashikiApp {
                     section_id,
                     stage_path.to_string_lossy()
                 ))
-                .w_4()
-                .text_center()
+                .flex_shrink_0()
+                .size(px(20.0))
                 .cursor_pointer()
-                .text_xs()
-                .text_color(if is_staged { rgb(BLUE) } else { rgb(GREEN) })
-                .hover(|b| {
-                    b.rounded_sm()
-                        .bg(rgb(BG_SURFACE1))
-                        .text_color(if is_staged { rgb(BLUE) } else { rgb(GREEN) })
-                })
+                .rounded_sm()
+                .hover(|b| b.bg(rgb(BG_SURFACE1)))
+                .flex()
+                .items_center()
+                .justify_center()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.toggle_file_staging(stage_path.clone(), is_staged, cx);
                 }))
-                .child(if is_staged { "-" } else { "+" })
+                .child(
+                    if is_staged {
+                        icon::arrow_down()
+                    } else {
+                        icon::arrow_up()
+                    }
+                    .size(px(12.0))
+                    .text_color(if is_staged { rgb(BLUE) } else { rgb(GREEN) }),
+                )
                 .into_any_element()
         } else {
-            div().w_4().into_any_element()
+            div().w(px(20.0)).flex_shrink_0().into_any_element()
         };
         let row = row.child(stage_btn);
 
@@ -726,12 +790,14 @@ impl SashikiApp {
                             section_id,
                             discard_path.to_string_lossy()
                         ))
-                        .w_4()
-                        .text_center()
+                        .flex_shrink_0()
+                        .size(px(20.0))
                         .cursor_pointer()
-                        .text_xs()
-                        .text_color(rgb(RED))
-                        .hover(|b| b.rounded_sm().bg(rgb(BG_SURFACE1)).text_color(rgb(RED)))
+                        .rounded_sm()
+                        .hover(|b| b.bg(rgb(BG_SURFACE1)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.open_discard_confirm(
                                 discard_path.clone(),
@@ -739,10 +805,10 @@ impl SashikiApp {
                                 cx,
                             );
                         }))
-                        .child("×")
+                        .child(icon::close().size(px(12.0)).text_color(rgb(RED)))
                         .into_any_element()
                 } else {
-                    div().w_4().into_any_element()
+                    div().w(px(20.0)).flex_shrink_0().into_any_element()
                 };
                 dir_row.child(discard_btn)
             } else {
@@ -849,26 +915,27 @@ impl SashikiApp {
                             section_id,
                             discard_path.to_string_lossy()
                         ))
-                        .w_4()
-                        .text_center()
+                        .flex_shrink_0()
+                        .size(px(20.0))
                         .cursor_pointer()
-                        .text_xs()
-                        .text_color(rgb(RED))
-                        .hover(|b| b.rounded_sm().bg(rgb(BG_SURFACE1)).text_color(rgb(RED)))
+                        .rounded_sm()
+                        .hover(|b| b.bg(rgb(BG_SURFACE1)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.open_discard_confirm(discard_path.clone(), change_type, cx);
                         }))
-                        .child("×")
+                        .child(icon::close().size(px(12.0)).text_color(rgb(RED)))
                         .into_any_element()
                 } else {
-                    div().w_4().into_any_element()
+                    div().w(px(20.0)).flex_shrink_0().into_any_element()
                 };
                 file_row.child(discard_btn)
             } else {
                 file_row
             };
 
-            // ステージボタン
             let stage_btn: AnyElement = if is_hovered {
                 div()
                     .id(format!(
@@ -876,23 +943,33 @@ impl SashikiApp {
                         section_id,
                         stage_path.to_string_lossy()
                     ))
-                    .w_4()
-                    .text_center()
+                    .flex_shrink_0()
+                    .size(px(20.0))
                     .cursor_pointer()
-                    .text_xs()
-                    .text_color(if is_staged { rgb(BLUE) } else { rgb(GREEN) })
-                    .hover(|b| {
-                        b.rounded_sm()
-                            .bg(rgb(BG_SURFACE1))
-                            .text_color(if is_staged { rgb(BLUE) } else { rgb(GREEN) })
-                    })
+                    .rounded_sm()
+                    .hover(|b| b.bg(rgb(BG_SURFACE1)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_file_staging(stage_path.clone(), is_staged, cx);
                     }))
-                    .child(if is_staged { "-" } else { "+" })
+                    .child(
+                        if is_staged {
+                            icon::arrow_down()
+                        } else {
+                            icon::arrow_up()
+                        }
+                        .size(px(12.0))
+                        .text_color(if is_staged {
+                            rgb(BLUE)
+                        } else {
+                            rgb(GREEN)
+                        }),
+                    )
                     .into_any_element()
             } else {
-                div().w_4().into_any_element()
+                div().w(px(20.0)).flex_shrink_0().into_any_element()
             };
             let file_row = file_row.child(stage_btn);
 

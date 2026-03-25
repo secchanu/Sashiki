@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{TerminalView, input_probe};
 use super::view::{ansi_color_to_hsla, named_color_to_hsla};
+use super::{TerminalView, input_probe};
 use crate::theme::*;
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
@@ -416,9 +416,7 @@ impl TerminalElement {
 
         // Pre-compute cursor display position
         let (cursor_disp_line, cursor_col) = layout.cursor;
-        let selection = layout
-            .selection
-            .filter(|sel| sel.start != sel.end);
+        let selection = layout.selection.filter(|sel| sel.start != sel.end);
 
         for (line_idx, row) in layout.cells.iter().enumerate() {
             let y = origin.y + line_height * line_idx;
@@ -470,8 +468,7 @@ impl TerminalElement {
                 );
 
                 let is_cursor = is_cursor_line && col_idx == cursor_col;
-                let is_selected = selection
-                    .map_or(false, |sel| sel.contains(actual_line, col_idx));
+                let is_selected = selection.map_or(false, |sel| sel.contains(actual_line, col_idx));
 
                 // Paint base background (selection or cell background)
                 let bg_color = if is_selected {
@@ -585,17 +582,16 @@ impl TerminalElement {
                     is_cursor && matches!(layout.cursor_shape, CursorShape::Block);
                 let is_hidden_cursor =
                     is_cursor && matches!(layout.cursor_shape, CursorShape::Hidden);
-                let fg_color = if is_block_cursor
-                    || (is_selected && (!is_cursor || is_hidden_cursor))
-                {
-                    Hsla::from(rgb(BG_BASE))
-                } else if is_url_hovered {
-                    Hsla::from(rgb(TEAL))
-                } else if is_url {
-                    Hsla::from(rgb(BLUE))
-                } else {
-                    cell_fg
-                };
+                let fg_color =
+                    if is_block_cursor || (is_selected && (!is_cursor || is_hidden_cursor)) {
+                        Hsla::from(rgb(BG_BASE))
+                    } else if is_url_hovered {
+                        Hsla::from(rgb(TEAL))
+                    } else if is_url {
+                        Hsla::from(rgb(BLUE))
+                    } else {
+                        cell_fg
+                    };
 
                 // Block elements (U+2580–U+259F): draw as filled rectangles instead of
                 // font glyphs (same approach as Alacritty's builtin_font).
@@ -625,9 +621,12 @@ impl TerminalElement {
                         underline: url_underline(is_url, fg_color),
                         strikethrough: None,
                     }];
-                    let shaped = window
-                        .text_system()
-                        .shape_line(wtext, font_size, &wrun, Some(render_width));
+                    let shaped = window.text_system().shape_line(
+                        wtext,
+                        font_size,
+                        &wrun,
+                        Some(render_width),
+                    );
                     let _ = shaped.paint(
                         Point::new(x, text_y),
                         line_height,

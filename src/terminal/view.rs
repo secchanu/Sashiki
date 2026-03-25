@@ -613,7 +613,10 @@ impl TerminalView {
 
         for (line_idx, row) in cached.cells.iter().enumerate() {
             line_text.clear();
-            line_text.extend(row.iter().map(|cell| if cell.c == '\0' { ' ' } else { cell.c }));
+            line_text.extend(
+                row.iter()
+                    .map(|cell| if cell.c == '\0' { ' ' } else { cell.c }),
+            );
 
             for mat in URL_REGEX.find_iter(&line_text) {
                 // Strip trailing punctuation that is commonly not part of URLs
