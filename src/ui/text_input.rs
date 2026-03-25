@@ -150,73 +150,50 @@ impl TextInput {
         self.move_cursor(new_cursor, shift);
     }
 
-    /// Handle a common text editing keystroke.
+    /// Handle a non-character text editing keystroke (navigation, deletion, etc.).
     ///
     /// Returns `true` if the key was consumed (state may have changed).
     ///
+    /// Printable character input (including space) is handled by the IME system
+    /// via `EntityInputHandler::replace_text_in_range`, not here.
+    ///
     /// - `multiline`: when `true`, Up/Down/Enter are handled as navigation/newline.
-    /// - `char_allowed`: called for printable character input; return `false` to reject.
-    pub fn handle_editing_key(
-        &mut self,
-        key: &str,
-        key_char: Option<&str>,
-        shift: bool,
-        multiline: bool,
-        char_allowed: impl Fn(char) -> bool,
-    ) -> bool {
+    pub fn handle_editing_key(&mut self, key: &str, shift: bool, multiline: bool) -> bool {
         match key {
-            "backspace" => return self.backspace(),
-            "delete" => return self.delete(),
+            "backspace" => self.backspace(),
+            "delete" => self.delete(),
             "left" => {
                 let pos = self.cursor.saturating_sub(1);
                 self.move_cursor(pos, shift);
-                return true;
+                true
             }
             "right" => {
                 let pos = (self.cursor + 1).min(self.text.chars().count());
                 self.move_cursor(pos, shift);
-                return true;
+                true
             }
             "home" => {
                 self.cursor_home(shift);
-                return true;
+                true
             }
             "end" => {
                 self.cursor_end(shift);
-                return true;
-            }
-            "space" => {
-                self.insert(" ");
-                return true;
+                true
             }
             "up" if multiline => {
                 self.cursor_up(shift);
-                return true;
+                true
             }
             "down" if multiline => {
                 self.cursor_down(shift);
-                return true;
+                true
             }
             "enter" if multiline => {
                 self.insert("\n");
-                return true;
+                true
             }
-            _ => {}
+            _ => false,
         }
-
-        // Printable character input via key_char
-        if let Some(kc) = key_char {
-            if kc.chars().count() == 1 {
-                if let Some(c) = kc.chars().next() {
-                    if char_allowed(c) {
-                        self.insert(kc);
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
     }
 
     /// Render the input text with cursor marker (`|`), selection highlight, and IME preedit.

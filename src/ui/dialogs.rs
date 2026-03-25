@@ -14,15 +14,17 @@ use gpui::{
 };
 
 impl SashikiApp {
-    /// Handle clipboard (Ctrl+A/C/X/V) and general text-editing keys for a dialog text input.
+    /// Handle clipboard (Ctrl+A/C/X/V) and navigation/editing keys for a dialog text input.
     /// Returns `true` when `cx.notify()` should be called.
+    ///
+    /// Printable character input is handled by the IME system via `EntityInputHandler`,
+    /// not here. This only handles shortcuts and non-character keys.
     /// Escape / Enter / dialog-specific shortcuts are handled by each caller before invoking this.
     fn handle_text_input_keys(
         &mut self,
         event: &KeyDownEvent,
         entity: Entity<TextInput>,
         multiline: bool,
-        char_allowed: impl Fn(char) -> bool,
         cx: &mut Context<Self>,
     ) -> bool {
         let key = &event.keystroke.key;
@@ -48,7 +50,6 @@ impl SashikiApp {
         if primary_mod && key == "v" {
             let clip = cx.read_from_clipboard().and_then(|item| item.text());
             if let Some(clip_text) = clip {
-                // Single-line inputs normalise newlines to spaces on paste.
                 let text = if !multiline {
                     normalize_single_line_text(&clip_text)
                 } else {
@@ -60,11 +61,10 @@ impl SashikiApp {
             return false;
         }
         if !primary_mod && !modifiers.alt {
-            let key_char = event.keystroke.key_char.clone();
             let shift = modifiers.shift;
             let key = key.to_string();
             return entity.update(cx, |input, _| {
-                input.handle_editing_key(&key, key_char.as_deref(), shift, multiline, char_allowed)
+                input.handle_editing_key(&key, shift, multiline)
             });
         }
         false
@@ -88,9 +88,7 @@ impl SashikiApp {
                     this.submit_create_worktree(window, cx);
                 } else {
                     let entity = this.create_input.clone();
-                    if this.handle_text_input_keys(event, entity, false, |c| {
-                        c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | '@')
-                    }, cx) {
+                    if this.handle_text_input_keys(event, entity, false, cx) {
                         cx.notify();
                     }
                 }
@@ -271,7 +269,7 @@ impl SashikiApp {
                     this.submit_commit(window, cx);
                 } else {
                     let entity = this.commit_input.clone();
-                    if this.handle_text_input_keys(event, entity, true, |_| true, cx) {
+                    if this.handle_text_input_keys(event, entity, true, cx) {
                         cx.notify();
                     }
                 }
@@ -518,7 +516,7 @@ impl SashikiApp {
                     this.create_stash(cx);
                 } else {
                     let entity = this.stash_input.clone();
-                    if this.handle_text_input_keys(event, entity, false, |_| true, cx) {
+                    if this.handle_text_input_keys(event, entity, false, cx) {
                         cx.notify();
                     }
                 }
@@ -1933,7 +1931,7 @@ impl SashikiApp {
                 } else {
                     let entity = this.settings_inputs[sec].clone();
                     let multiline = sec != 4;
-                    if this.handle_text_input_keys(event, entity, multiline, |_| true, cx) {
+                    if this.handle_text_input_keys(event, entity, multiline, cx) {
                         cx.notify();
                     }
                 }

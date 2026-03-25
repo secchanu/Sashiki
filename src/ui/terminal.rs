@@ -371,15 +371,11 @@ impl SashikiApp {
                                     }
                                     cx.notify();
                                 }))
-                                .child(
-                                    icon::plus()
-                                        .size(px(14.0))
-                                        .text_color(if verify_active {
-                                            rgb(BG_BASE)
-                                        } else {
-                                            rgb(TEXT_MUTED)
-                                        }),
-                                ),
+                                .child(icon::plus().size(px(14.0)).text_color(if verify_active {
+                                    rgb(BG_BASE)
+                                } else {
+                                    rgb(TEXT_MUTED)
+                                })),
                         )
                     }),
             )

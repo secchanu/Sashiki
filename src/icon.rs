@@ -12,26 +12,62 @@ use std::sync::OnceLock;
 static ICONS_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
-    ("arrow_down.svg", include_bytes!("../assets/icons/arrow_down.svg")),
-    ("arrow_up.svg", include_bytes!("../assets/icons/arrow_up.svg")),
+    (
+        "arrow_down.svg",
+        include_bytes!("../assets/icons/arrow_down.svg"),
+    ),
+    (
+        "arrow_up.svg",
+        include_bytes!("../assets/icons/arrow_up.svg"),
+    ),
     ("check.svg", include_bytes!("../assets/icons/check.svg")),
-    ("check_square.svg", include_bytes!("../assets/icons/check_square.svg")),
-    ("chevron_down.svg", include_bytes!("../assets/icons/chevron_down.svg")),
-    ("chevron_right.svg", include_bytes!("../assets/icons/chevron_right.svg")),
+    (
+        "check_square.svg",
+        include_bytes!("../assets/icons/check_square.svg"),
+    ),
+    (
+        "chevron_down.svg",
+        include_bytes!("../assets/icons/chevron_down.svg"),
+    ),
+    (
+        "chevron_right.svg",
+        include_bytes!("../assets/icons/chevron_right.svg"),
+    ),
     ("close.svg", include_bytes!("../assets/icons/close.svg")),
-    ("git_branch.svg", include_bytes!("../assets/icons/git_branch.svg")),
-    ("git_commit.svg", include_bytes!("../assets/icons/git_commit.svg")),
-    ("layout_grid.svg", include_bytes!("../assets/icons/layout_grid.svg")),
-    ("layout_single.svg", include_bytes!("../assets/icons/layout_single.svg")),
+    (
+        "git_branch.svg",
+        include_bytes!("../assets/icons/git_branch.svg"),
+    ),
+    (
+        "git_commit.svg",
+        include_bytes!("../assets/icons/git_commit.svg"),
+    ),
+    (
+        "layout_grid.svg",
+        include_bytes!("../assets/icons/layout_grid.svg"),
+    ),
+    (
+        "layout_single.svg",
+        include_bytes!("../assets/icons/layout_single.svg"),
+    ),
     ("list.svg", include_bytes!("../assets/icons/list.svg")),
     ("plus.svg", include_bytes!("../assets/icons/plus.svg")),
-    ("settings.svg", include_bytes!("../assets/icons/settings.svg")),
+    (
+        "settings.svg",
+        include_bytes!("../assets/icons/settings.svg"),
+    ),
     ("square.svg", include_bytes!("../assets/icons/square.svg")),
     ("stash.svg", include_bytes!("../assets/icons/stash.svg")),
     ("trash.svg", include_bytes!("../assets/icons/trash.svg")),
-    ("tree_view.svg", include_bytes!("../assets/icons/tree_view.svg")),
+    (
+        "tree_view.svg",
+        include_bytes!("../assets/icons/tree_view.svg"),
+    ),
     ("verify.svg", include_bytes!("../assets/icons/verify.svg")),
-    ("x_circle.svg", include_bytes!("../assets/icons/x_circle.svg")),
+    (
+        "x_circle.svg",
+        include_bytes!("../assets/icons/x_circle.svg"),
+    ),
 ];
 
 /// Initialize the icon directory path. Must be called once at app startup.
