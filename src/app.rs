@@ -14,7 +14,8 @@ use crate::session::{SessionGroup, SessionGroupManager};
 use crate::template::TemplateConfig;
 use crate::terminal::TerminalView;
 use crate::ui::{
-    ChangeSection, FileListMode, FileView, GotoDefinitionEvent, StageSelectionEvent, TextInput,
+    ChangeSection, FileListMode, FileView, FileViewCloseEvent, GotoDefinitionEvent,
+    StageSelectionEvent, TextInput,
 };
 use async_lock::Mutex as AsyncMutex;
 use gpui::{AppContext, Context, Entity, FocusHandle};
@@ -90,8 +91,6 @@ pub struct SashikiApp {
     pub(crate) menu_focus: FocusHandle,
     /// Currently highlighted menu item index for keyboard navigation
     pub(crate) menu_focused_item: usize,
-    /// Whether the verify terminal (2nd terminal) is shown in single mode
-    pub(crate) show_verify_terminal: bool,
     pub(crate) sidebar_width: f32,
     pub(crate) file_view_height: f32,
     pub(crate) terminal_split_ratio: f32,
@@ -142,6 +141,13 @@ impl SashikiApp {
         })
         .detach();
 
+        // Subscribe to close event from FileView to restore full-screen terminal
+        cx.subscribe(&file_view, |this, _, _: &FileViewCloseEvent, cx| {
+            this.show_file_view = false;
+            cx.notify();
+        })
+        .detach();
+
         let persisted_state = persistence::load_app_state();
         let (mut session_manager, active_dialog) =
             Self::initialize_session_groups(persisted_state.as_ref());
@@ -189,7 +195,6 @@ impl SashikiApp {
             open_menu: None,
             menu_focus,
             menu_focused_item: 0,
-            show_verify_terminal: false,
             sidebar_width: 224.0,
             file_view_height: 384.0,
             terminal_split_ratio: 0.5,
@@ -296,7 +301,6 @@ impl SashikiApp {
     fn restore_persisted_state(&mut self, state: &PersistedAppState, cx: &mut Context<Self>) {
         self.show_sidebar = state.ui.show_sidebar;
         self.show_file_list = state.ui.show_file_list;
-        self.show_verify_terminal = state.ui.show_verify_terminal;
         self.sidebar_width = state.ui.sidebar_width.clamp(120.0, 500.0);
         self.file_view_height = state.ui.file_view_height.clamp(100.0, 800.0);
         self.terminal_split_ratio = state.ui.terminal_split_ratio.clamp(0.2, 0.8);
@@ -347,7 +351,7 @@ impl SashikiApp {
             self.session_manager
                 .ensure_session_terminal(active_session, cx);
             self.session_manager.switch_to(active_session);
-            if self.show_verify_terminal {
+            if self.session_manager.active_show_sub_terminal() {
                 self.session_manager
                     .ensure_active_session_terminal_count(2, cx);
             }
@@ -386,7 +390,6 @@ impl SashikiApp {
             ui: PersistedUiState {
                 show_sidebar: self.show_sidebar,
                 show_file_list: self.show_file_list,
-                show_verify_terminal: self.show_verify_terminal,
                 sidebar_width: self.sidebar_width,
                 file_view_height: self.file_view_height,
                 terminal_split_ratio: self.terminal_split_ratio,

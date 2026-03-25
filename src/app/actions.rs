@@ -7,7 +7,7 @@ actions!(
     sashiki,
     [
         ToggleParallelMode,
-        ToggleVerifyTerminal,
+        ToggleSubTerminal,
         NextSession,
         PrevSession,
         ToggleSidebar,
@@ -34,14 +34,15 @@ impl SashikiApp {
         cx.notify();
     }
 
-    pub fn on_toggle_verify_terminal(
+    pub fn on_toggle_sub_terminal(
         &mut self,
-        _: &ToggleVerifyTerminal,
+        _: &ToggleSubTerminal,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_verify_terminal = !self.show_verify_terminal;
-        if self.show_verify_terminal {
+        let show = !self.session_manager.active_show_sub_terminal();
+        self.session_manager.set_active_show_sub_terminal(show);
+        if show {
             self.session_manager
                 .ensure_active_session_terminal_count(2, cx);
         }
@@ -54,7 +55,7 @@ impl SashikiApp {
         self.staged_expanded_dirs.clear();
         self.unstaged_expanded_dirs.clear();
         self.session_manager.ensure_active_session_terminal(cx);
-        if self.show_verify_terminal {
+        if self.session_manager.active_show_sub_terminal() {
             self.session_manager
                 .ensure_active_session_terminal_count(2, cx);
         }

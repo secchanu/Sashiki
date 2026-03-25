@@ -955,15 +955,20 @@ impl SashikiApp {
         self.prepare_session_for_deletion(index, cx);
         self.cleanup_resources_for_deletion(index, cx);
 
-        if let Some(repo) = self.session_manager.active_git_repo().cloned() {
-            // Non-fatal: git worktree prune will clean up orphaned entries.
-            if let Err(e) = repo.remove_worktree(&worktree_name) {
-                eprintln!("Warning: git worktree remove failed: {}", e);
-            }
-        }
+        let repo = self.session_manager.active_git_repo().cloned();
 
         self.active_dialog = ActiveDialog::Deleting;
         cx.spawn(async move |entity, cx| {
+            // ターミナルプロセスが完全に終了してからworktreeを削除するため、
+            // git worktree removeもリトライ付きの非同期処理で実行する。
+            // 同期実行するとWindowsでファイルハンドルが残りPermission deniedになる。
+            // Non-fatal: git worktree prune will clean up orphaned entries.
+            if let Some(r) = repo {
+                if let Err(e) = Self::remove_worktree_async(r, worktree_name).await {
+                    eprintln!("Warning: {}", e);
+                }
+            }
+            // git worktree remove が失敗した場合もディレクトリを確実に削除する
             let result = Self::remove_worktree_directory_async(&worktree_path).await;
             let _ = entity.update(cx, |app, cx| {
                 app.finish_delete_worktree(index, result, cx);
@@ -972,10 +977,41 @@ impl SashikiApp {
         .detach();
     }
 
+    /// Async version of git worktree remove with retries.
+    ///
+    /// ターミナルプロセスの終了を待ちながらリトライすることで、
+    /// Windowsのファイルロックによる Permission denied を回避する。
+    async fn remove_worktree_async(repo: GitRepo, name: String) -> Result<(), String> {
+        const MAX_RETRIES: u32 = 30;
+        const RETRY_DELAY_MS: u64 = 200;
+
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                smol::Timer::after(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+            }
+
+            let repo_clone = repo.clone();
+            let name_clone = name.clone();
+            let result = smol::unblock(move || repo_clone.remove_worktree(&name_clone)).await;
+
+            match result {
+                Ok(_) => return Ok(()),
+                Err(e) if attempt == MAX_RETRIES - 1 => {
+                    return Err(format!("git worktree remove failed: {}", e));
+                }
+                Err(_) => continue,
+            }
+        }
+
+        Err(format!(
+            "git worktree remove failed: still in use after retries"
+        ))
+    }
+
     /// Async version of directory removal with retries.
     pub(crate) async fn remove_worktree_directory_async(path: &Path) -> Result<(), String> {
-        const MAX_RETRIES: u32 = 10;
-        const RETRY_DELAY_MS: u64 = 100;
+        const MAX_RETRIES: u32 = 30;
+        const RETRY_DELAY_MS: u64 = 200;
 
         let path = path.to_path_buf();
 
@@ -1050,7 +1086,10 @@ impl SashikiApp {
     }
 
     pub fn cleanup_resources_for_deletion(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(terminal) = self.session_manager.get_session_active_terminal(index) {
+        // /exitせずに削除した場合も含め、セッションの全ターミナルをシャットダウンする。
+        // active terminalだけでなくverify terminalなど全て対象にすることで
+        // ファイルハンドルを確実に解放してディレクトリ削除を可能にする。
+        for terminal in self.session_manager.get_session_all_terminals(index) {
             terminal.update(cx, |view, _cx| view.shutdown());
         }
 

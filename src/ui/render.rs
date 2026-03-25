@@ -35,7 +35,7 @@ impl Render for SashikiApp {
             .on_action(cx.listener(Self::on_refresh_all))
             .on_action(cx.listener(Self::on_close_file_view))
             .on_action(cx.listener(Self::on_open_folder))
-            .on_action(cx.listener(Self::on_toggle_verify_terminal))
+            .on_action(cx.listener(Self::on_toggle_sub_terminal))
             .on_action(cx.listener(Self::on_open_commit_dialog))
             .on_action(cx.listener(Self::on_open_stash_dialog))
             .on_action(cx.listener(Self::on_close_active_group))
@@ -410,14 +410,15 @@ impl SashikiApp {
                         },
                     ))
                     .child(self.render_menu_item_indexed(
-                        "Toggle Verify Terminal",
+                        "Toggle Sub Terminal",
                         Some("Ctrl+T"),
                         3,
                         cx,
                         |this, _, cx| {
                             this.open_menu = None;
-                            this.show_verify_terminal = !this.show_verify_terminal;
-                            if this.show_verify_terminal {
+                            let show = !this.session_manager.active_show_sub_terminal();
+                            this.session_manager.set_active_show_sub_terminal(show);
+                            if show {
                                 this.session_manager
                                     .ensure_active_session_terminal_count(2, cx);
                             }
@@ -539,8 +540,9 @@ impl SashikiApp {
                     cx.notify();
                 }
                 3 => {
-                    self.show_verify_terminal = !self.show_verify_terminal;
-                    if self.show_verify_terminal {
+                    let show = !self.session_manager.active_show_sub_terminal();
+                    self.session_manager.set_active_show_sub_terminal(show);
+                    if show {
                         self.session_manager
                             .ensure_active_session_terminal_count(2, cx);
                     }

@@ -13,8 +13,8 @@ pub use text_input::TextInput;
 
 pub use file_tree::{ChangeInfo, ChangeSection, FileListMode, FileTreeNode, read_dir_shallow};
 pub use file_view::{
-    FileView, GotoDefinitionEvent, SelectionAction, SendToTerminalEvent, StageSelectionEvent,
-    StageSelectionKind,
+    FileView, FileViewCloseEvent, GotoDefinitionEvent, SelectionAction, SendToTerminalEvent,
+    StageSelectionEvent, StageSelectionKind,
 };
 
 use crate::theme::*;

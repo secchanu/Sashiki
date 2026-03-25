@@ -19,6 +19,10 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct SendToTerminalEvent(pub String);
 
+/// Event to close the file view panel
+#[derive(Debug, Clone)]
+pub struct FileViewCloseEvent;
+
 /// Event to request go-to-definition from a highlighted token click
 #[derive(Debug, Clone)]
 pub struct GotoDefinitionEvent {
@@ -1491,6 +1495,7 @@ impl FileView {
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
                                     this.close();
+                                    cx.emit(FileViewCloseEvent);
                                     cx.notify();
                                 }),
                             )
@@ -2384,6 +2389,7 @@ impl Focusable for FileView {
 impl EventEmitter<SendToTerminalEvent> for FileView {}
 impl EventEmitter<GotoDefinitionEvent> for FileView {}
 impl EventEmitter<StageSelectionEvent> for FileView {}
+impl EventEmitter<FileViewCloseEvent> for FileView {}
 
 impl Render for FileView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

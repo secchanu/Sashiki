@@ -79,6 +79,8 @@ pub struct Session {
     status: SessionStatus,
     /// Whether to show in parallel mode
     visible_in_parallel: bool,
+    /// Whether the sub terminal (2nd terminal pane) is shown for this session
+    show_sub_terminal: bool,
 }
 
 impl Session {
@@ -92,6 +94,7 @@ impl Session {
             color: SessionColor::for_index(color_index),
             status: SessionStatus::Stopped,
             visible_in_parallel: false,
+            show_sub_terminal: false,
         }
     }
 
@@ -290,6 +293,14 @@ impl Session {
     /// Set visible in parallel mode
     pub(crate) fn set_visible_in_parallel(&mut self, visible: bool) {
         self.visible_in_parallel = visible;
+    }
+
+    pub fn show_sub_terminal(&self) -> bool {
+        self.show_sub_terminal
+    }
+
+    pub fn set_show_sub_terminal(&mut self, show: bool) {
+        self.show_sub_terminal = show;
     }
 }
 
@@ -519,6 +530,14 @@ impl SessionManager {
             .cloned()
     }
 
+    /// Get all terminals for a specific session
+    pub fn get_session_all_terminals(&self, index: usize) -> Vec<Entity<TerminalView>> {
+        self.sessions
+            .get(index)
+            .map(|s| s.terminals.clone())
+            .unwrap_or_default()
+    }
+
     /// Switch to session by index and update statuses
     /// Also marks the session as visible in parallel mode
     pub fn switch_to(&mut self, index: usize) {
@@ -564,6 +583,18 @@ impl SessionManager {
     /// Get active session index
     pub fn active_index(&self) -> usize {
         self.active_index
+    }
+
+    pub fn active_show_sub_terminal(&self) -> bool {
+        self.active_session()
+            .map(|s| s.show_sub_terminal())
+            .unwrap_or(false)
+    }
+
+    pub fn set_active_show_sub_terminal(&mut self, show: bool) {
+        if let Some(session) = self.sessions.get_mut(self.active_index) {
+            session.set_show_sub_terminal(show);
+        }
     }
 
     /// Get layout mode
@@ -898,19 +929,31 @@ impl SessionGroupManager {
         }
     }
 
-    pub fn get_session_active_terminal(
+    pub fn get_session_all_terminals(
         &self,
         index: usize,
-    ) -> Option<gpui::Entity<crate::terminal::TerminalView>> {
-        self.active_group()?
-            .session_manager
-            .get_session_active_terminal(index)
+    ) -> Vec<gpui::Entity<crate::terminal::TerminalView>> {
+        self.active_group()
+            .map(|g| g.session_manager.get_session_all_terminals(index))
+            .unwrap_or_default()
     }
 
     pub fn apply_terminal_default_directory_to_all(&mut self, relative_path: Option<&str>) {
         if let Some(g) = self.active_group_mut() {
             g.session_manager
                 .apply_terminal_default_directory_to_all(relative_path);
+        }
+    }
+
+    pub fn active_show_sub_terminal(&self) -> bool {
+        self.active_group()
+            .map(|g| g.session_manager.active_show_sub_terminal())
+            .unwrap_or(false)
+    }
+
+    pub fn set_active_show_sub_terminal(&mut self, show: bool) {
+        if let Some(g) = self.active_group_mut() {
+            g.session_manager.set_active_show_sub_terminal(show);
         }
     }
 }

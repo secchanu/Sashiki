@@ -18,7 +18,7 @@ mod ui;
 
 use app::{
     CloseFileView, NextSession, OpenFolder, PrevSession, Quit, RefreshAll, SashikiApp,
-    ToggleFileList, ToggleParallelMode, ToggleSidebar, ToggleVerifyTerminal,
+    ToggleFileList, ToggleParallelMode, ToggleSidebar, ToggleSubTerminal,
 };
 use gpui::{App, AppContext, Application, Focusable, KeyBinding, Menu, MenuItem, WindowOptions};
 use terminal::TerminalView;
@@ -35,7 +35,7 @@ fn main() {
             KeyBinding::new("ctrl-tab", NextSession, None),
             KeyBinding::new("ctrl-shift-tab", PrevSession, None),
             KeyBinding::new("ctrl-b", ToggleSidebar, None),
-            KeyBinding::new("ctrl-t", ToggleVerifyTerminal, None),
+            KeyBinding::new("ctrl-t", ToggleSubTerminal, None),
             KeyBinding::new("ctrl-e", ToggleFileList, None),
             KeyBinding::new("ctrl-r", RefreshAll, None),
             KeyBinding::new("escape", CloseFileView, None),

@@ -20,7 +20,8 @@ struct TerminalHeaderProps {
     is_main: bool,
     is_locked: bool,
     path_display: String,
-    show_verify_button: bool,
+    /// Whether this panel can be closed (sub terminal panels)
+    closable: bool,
 }
 
 impl SashikiApp {
@@ -45,7 +46,7 @@ impl SashikiApp {
 
         let active_index = self.session_manager.active_index();
 
-        if self.show_verify_terminal {
+        if self.session_manager.active_show_sub_terminal() {
             let ratio = self.terminal_split_ratio;
             div()
                 .flex_1()
@@ -58,7 +59,7 @@ impl SashikiApp {
                         .flex()
                         .flex_col()
                         .overflow_hidden()
-                        .child(self.render_terminal_panel(active_index, true, cx)),
+                        .child(self.render_terminal_panel(active_index, true, None, cx)),
                 )
                 .child(self.render_resize_handle_v(
                     ResizeDrag::TerminalSplit {
@@ -73,11 +74,46 @@ impl SashikiApp {
                         .flex()
                         .flex_col()
                         .overflow_hidden()
-                        .child(self.render_verify_terminal_panel(active_index, cx)),
+                        .child(self.render_terminal_panel(active_index, false, Some(1), cx)),
                 )
                 .into_any_element()
         } else {
-            self.render_terminal_panel(active_index, true, cx)
+            div()
+                .flex_1()
+                .flex()
+                .flex_row()
+                .overflow_hidden()
+                .child(self.render_terminal_panel(active_index, true, None, cx))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(28.0))
+                        .h_full()
+                        .flex()
+                        .items_start()
+                        .justify_center()
+                        .pt_1()
+                        .child(
+                            div()
+                                .id("add-sub-terminal-btn")
+                                .size(px(24.0))
+                                .cursor_pointer()
+                                .rounded_sm()
+                                .bg(rgb(BG_SURFACE0))
+                                .hover(|el| el.bg(rgb(BG_SURFACE2)))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.session_manager.set_active_show_sub_terminal(true);
+                                    this.session_manager
+                                        .ensure_active_session_terminal_count(2, cx);
+                                    cx.notify();
+                                }))
+                                .child(icon::plus().size(px(14.0)).text_color(rgb(TEXT_MUTED))),
+                        ),
+                )
+                .into_any_element()
         }
     }
 
@@ -108,7 +144,12 @@ impl SashikiApp {
                 if grid_index < count {
                     let (session_index, _) = parallel_sessions[grid_index];
                     let is_focused = session_index == active_index;
-                    col_elements.push(self.render_terminal_panel(session_index, is_focused, cx));
+                    col_elements.push(self.render_terminal_panel(
+                        session_index,
+                        is_focused,
+                        None,
+                        cx,
+                    ));
                 } else {
                     col_elements.push(div().flex_1().into_any_element());
                 }
@@ -132,10 +173,13 @@ impl SashikiApp {
             .into_any_element()
     }
 
+    /// Render a terminal panel for a session.
+    /// `terminal_index`: None = active terminal, Some(i) = specific terminal at index i.
     pub fn render_terminal_panel(
         &self,
         session_index: usize,
         is_focused: bool,
+        terminal_index: Option<usize>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let sessions = self.session_manager.sessions();
@@ -147,17 +191,20 @@ impl SashikiApp {
         let is_locked = session.is_locked();
         let status = session.status();
         let path_display = session.worktree_path().to_string_lossy().to_string();
-        let show_verify_button =
-            is_focused && self.session_manager.layout_mode() == LayoutMode::Single;
+        let closable = terminal_index.is_some();
 
-        let terminal_content: AnyElement = if let Some(terminal) = session.active_terminal() {
+        let terminal = match terminal_index {
+            Some(i) => session.get_terminal(i).cloned(),
+            None => session.active_terminal().cloned(),
+        };
+        let terminal_content: AnyElement = if let Some(terminal) = terminal {
             div()
                 .flex_1()
                 .w_full()
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .child(terminal.clone())
+                .child(terminal)
                 .into_any_element()
         } else {
             div()
@@ -193,70 +240,10 @@ impl SashikiApp {
                     is_main,
                     is_locked,
                     path_display,
-                    show_verify_button,
+                    closable,
                 },
                 cx,
             ))
-            .child(terminal_content)
-            .into_any_element()
-    }
-
-    fn render_verify_terminal_panel(
-        &self,
-        session_index: usize,
-        _cx: &Context<Self>,
-    ) -> AnyElement {
-        let sessions = self.session_manager.sessions();
-        let session = &sessions[session_index];
-        let color = session.color().primary;
-
-        let terminal_content: AnyElement = if let Some(terminal) = session.get_terminal(1) {
-            div()
-                .flex_1()
-                .w_full()
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .child(terminal.clone())
-                .into_any_element()
-        } else {
-            div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(BG_BASE))
-                .text_color(rgb(TEXT_MUTED))
-                .child("Verify terminal not started")
-                .into_any_element()
-        };
-
-        div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .border_2()
-            .border_color(rgb(BG_SURFACE0))
-            .rounded_md()
-            .m_1()
-            .child(
-                div()
-                    .h_8()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .bg(rgb(BG_MANTLE))
-                    .border_b_2()
-                    .border_color(rgb(color))
-                    .child(
-                        div()
-                            .text_color(rgb(color))
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Verify"),
-                    ),
-            )
             .child(terminal_content)
             .into_any_element()
     }
@@ -274,10 +261,8 @@ impl SashikiApp {
             is_main,
             is_locked,
             path_display,
-            show_verify_button,
+            closable,
         } = props;
-
-        let verify_active = self.show_verify_terminal;
 
         div()
             .h_8()
@@ -346,36 +331,24 @@ impl SashikiApp {
                             .truncate()
                             .child(path_display),
                     )
-                    .when(show_verify_button, |el| {
+                    .when(closable, |el| {
                         el.child(
                             div()
-                                .id("toggle-verify-btn")
+                                .id("close-sub-terminal-btn")
                                 .flex_shrink_0()
                                 .size(px(24.0))
                                 .cursor_pointer()
                                 .rounded_sm()
-                                .bg(if verify_active {
-                                    rgb(MAUVE)
-                                } else {
-                                    rgb(BG_SURFACE0)
-                                })
+                                .bg(rgb(BG_SURFACE0))
                                 .hover(|el| el.bg(rgb(BG_SURFACE2)))
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_verify_terminal = !this.show_verify_terminal;
-                                    if this.show_verify_terminal {
-                                        this.session_manager
-                                            .ensure_active_session_terminal_count(2, cx);
-                                    }
+                                    this.session_manager.set_active_show_sub_terminal(false);
                                     cx.notify();
                                 }))
-                                .child(icon::plus().size(px(14.0)).text_color(if verify_active {
-                                    rgb(BG_BASE)
-                                } else {
-                                    rgb(TEXT_MUTED)
-                                })),
+                                .child(icon::close().size(px(14.0)).text_color(rgb(TEXT_MUTED))),
                         )
                     }),
             )

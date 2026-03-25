@@ -140,6 +140,9 @@ impl Terminal {
         // Send "exit" command to terminate the shell
         // This works for cmd.exe, powershell, bash, etc.
         self.pty_tx.notify(b"exit\r".to_vec());
+        // PTY EventLoopスレッドをシャットダウンしてPTYプロセスを強制終了する。
+        // graceful exitだけではWindowsでファイルハンドルが残りディレクトリ削除が失敗するため。
+        let _ = self.pty_tx.0.send(Msg::Shutdown);
     }
 
     /// Resize the terminal to new dimensions

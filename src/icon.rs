@@ -20,7 +20,6 @@ const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
         "arrow_up.svg",
         include_bytes!("../assets/icons/arrow_up.svg"),
     ),
-    ("check.svg", include_bytes!("../assets/icons/check.svg")),
     (
         "check_square.svg",
         include_bytes!("../assets/icons/check_square.svg"),
@@ -58,12 +57,10 @@ const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
     ),
     ("square.svg", include_bytes!("../assets/icons/square.svg")),
     ("stash.svg", include_bytes!("../assets/icons/stash.svg")),
-    ("trash.svg", include_bytes!("../assets/icons/trash.svg")),
     (
         "tree_view.svg",
         include_bytes!("../assets/icons/tree_view.svg"),
     ),
-    ("verify.svg", include_bytes!("../assets/icons/verify.svg")),
     (
         "x_circle.svg",
         include_bytes!("../assets/icons/x_circle.svg"),
@@ -133,10 +130,6 @@ pub fn plus() -> Svg {
     icon("plus.svg")
 }
 
-pub fn trash() -> Svg {
-    icon("trash.svg")
-}
-
 pub fn settings() -> Svg {
     icon("settings.svg")
 }
@@ -195,14 +188,4 @@ pub fn arrow_down() -> Svg {
 
 pub fn x_circle() -> Svg {
     icon("x_circle.svg")
-}
-
-// === Misc ===
-
-pub fn verify() -> Svg {
-    icon("verify.svg")
-}
-
-pub fn check() -> Svg {
-    icon("check.svg")
 }

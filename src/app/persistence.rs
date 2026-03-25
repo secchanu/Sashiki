@@ -32,7 +32,6 @@ impl Default for PersistedAppState {
 pub(crate) struct PersistedUiState {
     pub show_sidebar: bool,
     pub show_file_list: bool,
-    pub show_verify_terminal: bool,
     pub sidebar_width: f32,
     pub file_view_height: f32,
     pub terminal_split_ratio: f32,
@@ -48,7 +47,6 @@ impl Default for PersistedUiState {
         Self {
             show_sidebar: true,
             show_file_list: true,
-            show_verify_terminal: false,
             sidebar_width: 224.0,
             file_view_height: 384.0,
             terminal_split_ratio: 0.5,
