@@ -36,9 +36,22 @@ pub const MAROON: u32 = 0xeb8e82; // error[300] - soft red
 pub const SAPPHIRE: u32 = 0x83afe0; // primary[300] - light blue
 pub const SKY: u32 = 0x6bbbb6; // accent[300] - light teal
 
-// Diff colors (based on success/error 950 tints)
-pub const DIFF_ADDED_BG: u32 = 0x000d03; // success[950]
-pub const DIFF_REMOVED_BG: u32 = 0x1b0000; // error[950]
+// Diff colors (行レベル背景: GitHub dark default 準拠)
+pub const DIFF_ADDED_BG: u32 = 0x122d1f; // 緑背景 (GitHub: #122117 よりやや明るく)
+pub const DIFF_REMOVED_BG: u32 = 0x3b1620; // 赤背景 (GitHub: #2d1117 よりやや明るく)
+// 文字レベル diff ハイライト背景 (行背景比3:1以上のコントラスト比を確保)
+pub const DIFF_ADDED_WORD_BG: u32 = 0x1e7b37ff; // RGBA: 文字レベル追加強調 (DIFF_ADDED_BGと3:1コントラスト)
+pub const DIFF_REMOVED_WORD_BG: u32 = 0xbf2626ff; // RGBA: 文字レベル削除強調 (DIFF_REMOVED_BGと3:1コントラスト)
+// Hunk ヘッダー行
+pub const DIFF_HUNK_HEADER_BG: u32 = 0x0d1f38; // 暗い青背景 (primary[900]相当)
+pub const DIFF_HUNK_HEADER_FG: u32 = 0x83afe0; // 明るい青テキスト (SAPPHIRE と同値)
+// 行番号ガター背景 (VS Code/GitHub準拠: 行背景より暗いtint)
+pub const DIFF_ADDED_GUTTER_BG: u32 = 0x0e2318; // DIFF_ADDED_BG より暗い緑
+pub const DIFF_REMOVED_GUTTER_BG: u32 = 0x30111a; // DIFF_REMOVED_BG より暗い赤
+// フィラー行 (split view: 対面パネルの追加/削除に対応する空行)
+pub const DIFF_FILLER_BG: u32 = 0x171b20; // BG_MANTLE より微かに明るいグレー (VS Code準拠)
+// 省略行
+pub const DIFF_COLLAPSE_BG: u32 = 0x1a1e24; // BG_SURFACE0 よりやや暗め
 
 // Terminal ANSI colors (aligned with yukidama-ui palette)
 // Normal colors use [400] level, bright colors use [300] level for dark mode

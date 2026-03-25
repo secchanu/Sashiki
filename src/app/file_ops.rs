@@ -265,8 +265,10 @@ impl SashikiApp {
             }
         }
 
+        let display_path = path.to_string_lossy().replace('\\', "/");
         self.file_view.update(cx, move |view, _cx| {
             let saved_mode = target_line.map(|_| view.mode());
+            view.set_display_path(display_path);
             view.set_change_section(section);
             view.set_change_type(change_type);
 
