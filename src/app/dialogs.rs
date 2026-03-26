@@ -138,17 +138,101 @@ impl SashikiApp {
 
         match result {
             Ok(()) => {
+                let do_push = self.commit_and_push;
+                let do_sync = self.commit_and_sync;
                 self.commit_amend_mode = false;
+                self.commit_and_push = false;
+                self.commit_and_sync = false;
                 self.close_commit_dialog(window, cx);
                 self.refresh_file_list_async(cx);
+
+                if do_sync || do_push {
+                    if let Some(path) = self
+                        .session_manager
+                        .active_session()
+                        .map(|s| s.worktree_path().to_path_buf())
+                    {
+                        if do_sync {
+                            self.git_sync_async(path, cx);
+                        } else {
+                            self.git_push_async(path, cx);
+                        }
+                    }
+                }
             }
             Err(e) => {
+                self.commit_and_push = false;
+                self.commit_and_sync = false;
                 self.active_dialog = ActiveDialog::Error {
                     message: format!("Failed to commit: {}", e),
                 };
                 cx.notify();
             }
         }
+    }
+
+    pub fn git_push_async(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.git_sync_in_progress = true;
+        cx.notify();
+
+        cx.spawn(async move |entity, cx| {
+            let result = GitRepo::open(&path).and_then(|repo| repo.push());
+            let _ = entity.update(cx, move |app, cx| {
+                app.git_sync_in_progress = false;
+                if let Err(e) = result {
+                    app.active_dialog = ActiveDialog::Error {
+                        message: format!("Push failed: {}", e),
+                    };
+                }
+                app.refresh_git_sync_state();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn git_pull_async(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.git_sync_in_progress = true;
+        cx.notify();
+
+        cx.spawn(async move |entity, cx| {
+            let result = GitRepo::open(&path).and_then(|repo| repo.pull());
+            let _ = entity.update(cx, move |app, cx| {
+                app.git_sync_in_progress = false;
+                if let Err(e) = result {
+                    app.active_dialog = ActiveDialog::Error {
+                        message: format!("Pull failed: {}", e),
+                    };
+                }
+                app.refresh_file_list_async(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Sync: pull (rebase) then push, like VSCode's Sync Changes.
+    pub fn git_sync_async(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.git_sync_in_progress = true;
+        cx.notify();
+
+        cx.spawn(async move |entity, cx| {
+            let result = GitRepo::open(&path).and_then(|repo| {
+                repo.pull()?;
+                repo.push()
+            });
+            let _ = entity.update(cx, move |app, cx| {
+                app.git_sync_in_progress = false;
+                if let Err(e) = result {
+                    app.active_dialog = ActiveDialog::Error {
+                        message: format!("Sync failed: {}", e),
+                    };
+                }
+                app.refresh_file_list_async(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn open_stash_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -731,11 +815,31 @@ impl SashikiApp {
         };
         match result {
             Ok(()) => {
+                let do_push = self.commit_and_push;
+                let do_sync = self.commit_and_sync;
                 self.commit_amend_mode = false;
+                self.commit_and_push = false;
+                self.commit_and_sync = false;
                 self.close_commit_dialog(window, cx);
                 self.refresh_file_list_async(cx);
+
+                if do_sync || do_push {
+                    if let Some(path) = self
+                        .session_manager
+                        .active_session()
+                        .map(|s| s.worktree_path().to_path_buf())
+                    {
+                        if do_sync {
+                            self.git_sync_async(path, cx);
+                        } else {
+                            self.git_push_async(path, cx);
+                        }
+                    }
+                }
             }
             Err(e) => {
+                self.commit_and_push = false;
+                self.commit_and_sync = false;
                 self.active_dialog = ActiveDialog::Error {
                     message: format!("Failed to commit: {}", e),
                 };
@@ -768,11 +872,31 @@ impl SashikiApp {
         };
         match result {
             Ok(()) => {
+                let do_push = self.commit_and_push;
+                let do_sync = self.commit_and_sync;
                 self.commit_amend_mode = false;
+                self.commit_and_push = false;
+                self.commit_and_sync = false;
                 self.close_commit_dialog(window, cx);
                 self.refresh_file_list_async(cx);
+
+                if do_sync || do_push {
+                    if let Some(path) = self
+                        .session_manager
+                        .active_session()
+                        .map(|s| s.worktree_path().to_path_buf())
+                    {
+                        if do_sync {
+                            self.git_sync_async(path, cx);
+                        } else {
+                            self.git_push_async(path, cx);
+                        }
+                    }
+                }
             }
             Err(e) => {
+                self.commit_and_push = false;
+                self.commit_and_sync = false;
                 self.active_dialog = ActiveDialog::Error {
                     message: format!("Failed to amend commit: {}", e),
                 };

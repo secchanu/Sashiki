@@ -1104,6 +1104,64 @@ impl GitRepo {
         let _ = run_git(&self.workdir, &["config", "--local", "--unset-all", key]);
         Ok(())
     }
+
+    /// Get ahead/behind counts for a branch relative to its upstream.
+    /// Returns `(ahead, behind)`. Returns `(0, 0)` if no upstream is configured.
+    pub fn ahead_behind(&self, branch: &str) -> Result<(usize, usize)> {
+        let upstream = format!("{}@{{u}}", branch);
+        let range = format!("{}...{}", branch, upstream);
+        match run_git(
+            &self.workdir,
+            &["rev-list", "--left-right", "--count", &range],
+        ) {
+            Ok(output) => {
+                let parts: Vec<&str> = output.trim().split('\t').collect();
+                if parts.len() == 2 {
+                    let ahead = parts[0].parse::<usize>().unwrap_or(0);
+                    let behind = parts[1].parse::<usize>().unwrap_or(0);
+                    Ok((ahead, behind))
+                } else {
+                    Ok((0, 0))
+                }
+            }
+            // No upstream configured
+            Err(_) => Ok((0, 0)),
+        }
+    }
+
+    /// Check if the current branch has an upstream configured.
+    pub fn has_upstream(&self, branch: &str) -> bool {
+        run_git(
+            &self.workdir,
+            &["config", &format!("branch.{}.remote", branch)],
+        )
+        .is_ok()
+    }
+
+    /// Fetch from the default remote with prune (silent, for updating ahead/behind).
+    /// `--prune` removes remote-tracking references for branches deleted on the remote.
+    pub fn fetch(&self) -> Result<String> {
+        run_git(&self.workdir, &["fetch", "--prune"])
+    }
+
+    /// Push the current branch to its upstream remote.
+    /// If no upstream is configured, automatically sets it with `--set-upstream origin <branch>`.
+    pub fn push(&self) -> Result<String> {
+        match run_git(&self.workdir, &["push"]) {
+            Ok(output) => Ok(output),
+            Err(GitError::Command(msg)) if msg.contains("no upstream branch") => {
+                let branch = run_git(&self.workdir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+                let branch = branch.trim();
+                run_git(&self.workdir, &["push", "--set-upstream", "origin", branch])
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Pull changes from the upstream remote with rebase (`git pull --rebase`).
+    pub fn pull(&self) -> Result<String> {
+        run_git(&self.workdir, &["pull", "--rebase"])
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

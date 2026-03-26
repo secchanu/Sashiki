@@ -103,12 +103,24 @@ pub struct SashikiApp {
     pub(crate) pending_discard_hunk: Option<StageSelectionEvent>,
     /// Whether the commit split-button dropdown is open.
     pub(crate) commit_dropdown_open: bool,
+    /// After commit succeeds, automatically push.
+    pub(crate) commit_and_push: bool,
+    /// After commit succeeds, automatically sync (pull + push).
+    pub(crate) commit_and_sync: bool,
     /// Scope of changes to include when pushing a new stash.
     pub(crate) stash_mode: crate::git::StashMode,
     /// Files changed in each stash entry, keyed by stash reference. Loaded on dialog open.
     pub(crate) stash_entry_files: std::collections::HashMap<String, Vec<(String, String)>>,
     /// Stash entries currently expanded to show their file list.
     pub(crate) stash_expanded_entries: std::collections::HashSet<String>,
+    /// Number of local commits ahead of upstream for the active worktree.
+    pub(crate) git_ahead: usize,
+    /// Number of remote commits behind upstream for the active worktree.
+    pub(crate) git_behind: usize,
+    /// Whether the active branch has an upstream configured.
+    pub(crate) git_has_upstream: bool,
+    /// Whether a git sync operation (push/pull/sync) is currently running.
+    pub(crate) git_sync_in_progress: bool,
 }
 
 impl SashikiApp {
@@ -204,9 +216,15 @@ impl SashikiApp {
             changes_view_is_tree: true,
             pending_discard_hunk: None,
             commit_dropdown_open: false,
+            commit_and_push: false,
+            commit_and_sync: false,
             stash_mode: crate::git::StashMode::default(),
             stash_entry_files: std::collections::HashMap::new(),
             stash_expanded_entries: std::collections::HashSet::new(),
+            git_ahead: 0,
+            git_behind: 0,
+            git_has_upstream: false,
+            git_sync_in_progress: false,
         };
 
         if let Some(state) = persisted_state.as_ref() {
@@ -214,7 +232,66 @@ impl SashikiApp {
         }
 
         app.refresh_changed_files_sync();
+        app.refresh_git_sync_state();
+        app.start_auto_fetch(cx);
         app
+    }
+
+    /// Start background auto-fetch loop (180s interval, like VSCode's git.autofetch).
+    /// Silently fetches from remote and updates ahead/behind counts.
+    fn start_auto_fetch(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |entity, cx| {
+            loop {
+                // Wait 180 seconds before each fetch cycle
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(180))
+                    .await;
+
+                // Get active worktree info
+                let info = entity
+                    .read_with(cx, |app, _| {
+                        if app.git_sync_in_progress {
+                            return None;
+                        }
+                        let session = app.session_manager.active_session()?;
+                        let path = session.worktree_path().to_path_buf();
+                        let branch = session.branch()?.to_string();
+                        Some((path, branch))
+                    })
+                    .ok()
+                    .flatten();
+
+                let Some((path, branch)) = info else {
+                    continue;
+                };
+
+                // Fetch and compute ahead/behind on background thread
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let repo = crate::git::GitRepo::open(&path).ok()?;
+                        let _ = repo.fetch();
+                        let has_upstream = repo.has_upstream(&branch);
+                        let (ahead, behind) = if has_upstream {
+                            repo.ahead_behind(&branch).unwrap_or((0, 0))
+                        } else {
+                            (0, 0)
+                        };
+                        Some((has_upstream, ahead, behind))
+                    })
+                    .await;
+
+                if let Some((has_upstream, ahead, behind)) = result {
+                    let _ = entity.update(cx, move |app, cx| {
+                        app.git_has_upstream = has_upstream;
+                        app.git_ahead = ahead;
+                        app.git_behind = behind;
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     fn initialize_session_groups(

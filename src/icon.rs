@@ -65,6 +65,11 @@ const EMBEDDED_ICONS: &[(&str, &[u8])] = &[
         "x_circle.svg",
         include_bytes!("../assets/icons/x_circle.svg"),
     ),
+    ("sync.svg", include_bytes!("../assets/icons/sync.svg")),
+    (
+        "cloud_upload.svg",
+        include_bytes!("../assets/icons/cloud_upload.svg"),
+    ),
 ];
 
 /// Initialize the icon directory path. Must be called once at app startup.
@@ -188,4 +193,12 @@ pub fn arrow_down() -> Svg {
 
 pub fn x_circle() -> Svg {
     icon("x_circle.svg")
+}
+
+pub fn sync() -> Svg {
+    icon("sync.svg")
+}
+
+pub fn cloud_upload() -> Svg {
+    icon("cloud_upload.svg")
 }

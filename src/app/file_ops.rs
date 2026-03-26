@@ -19,10 +19,11 @@ impl SashikiApp {
             .map(|s| s.worktree_path().to_path_buf())
     }
 
-    /// Refresh file list for the active session (sync)
+    /// Refresh file list and git sync state for the active session (sync)
     pub fn refresh_file_list(&mut self) {
         self.invalidate_worktree_repo_cache();
         self.refresh_changed_files_sync();
+        self.refresh_git_sync_state();
     }
 
     /// Async version of refresh_file_list - spawns background task
@@ -74,6 +75,37 @@ impl SashikiApp {
 
         // Clear stale entries if both active worktree and fallback repo refresh fail.
         self.changed_files.clear();
+    }
+
+    /// Update git ahead/behind/upstream state synchronously (for initial load).
+    pub fn refresh_git_sync_state(&mut self) {
+        let Some(session) = self.session_manager.active_session() else {
+            self.git_ahead = 0;
+            self.git_behind = 0;
+            self.git_has_upstream = false;
+            return;
+        };
+
+        let path = session.worktree_path().to_path_buf();
+        let branch = session.branch().unwrap_or_default().to_string();
+        if branch.is_empty() {
+            self.git_ahead = 0;
+            self.git_behind = 0;
+            self.git_has_upstream = false;
+            return;
+        }
+
+        if let Ok(repo) = GitRepo::open(&path) {
+            self.git_has_upstream = repo.has_upstream(&branch);
+            if self.git_has_upstream {
+                let (ahead, behind) = repo.ahead_behind(&branch).unwrap_or((0, 0));
+                self.git_ahead = ahead;
+                self.git_behind = behind;
+            } else {
+                self.git_ahead = 0;
+                self.git_behind = 0;
+            }
+        }
     }
 
     /// Returns a cached GitRepo for the active worktree, creating it if needed.

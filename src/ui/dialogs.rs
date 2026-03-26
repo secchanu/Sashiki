@@ -2856,16 +2856,19 @@ impl SashikiApp {
             .into_any_element()
     }
 
-    // === Commit dropdown overlay ===
+    // === Action dropdown overlay ===
 
-    /// Commitスプリットボタンの▾を押したときに表示するドロップダウン。
-    /// アプリメニューと同じオーバーレイ方式で表示し、外側クリックで閉じる。
+    /// メインアクションボタンの▾を押したときに表示するドロップダウン。
+    /// 状態に応じて内容が変わる:
+    /// - 変更あり: Commit / Commit & Push / Commit & Sync / Amend / Undo
+    /// - 変更なし + ahead/behind: Sync / Push / Pull
     pub fn render_commit_dropdown_overlay(&self, cx: &Context<Self>) -> AnyElement {
+        let has_changes = !self.changed_files.is_empty();
+
         div()
             .id("commit-dropdown-overlay")
             .absolute()
             .inset_0()
-            // 外側クリックで閉じる透明バックドロップ
             .child(
                 div()
                     .id("commit-dropdown-backdrop")
@@ -2879,51 +2882,129 @@ impl SashikiApp {
                         }),
                     ),
             )
-            // ドロップダウン本体 (ヘッダーの真下・右端に配置)
             .child(
                 div()
                     .absolute()
                     .top(gpui::px(32.))
                     .right(gpui::px(4.))
-                    .child(
-                        div()
-                            .id("commit-dropdown-menu")
-                            .occlude()
-                            .min_w_40()
-                            .bg(rgb(BG_BASE))
-                            .border_1()
-                            .border_color(rgb(BG_SURFACE1))
-                            .rounded_sm()
-                            .shadow_lg()
-                            .py_1()
-                            .child(Self::render_commit_dropdown_item(
-                                "Commit",
-                                cx,
-                                |this, window, cx| {
-                                    this.commit_dropdown_open = false;
-                                    this.open_commit_dialog(window, cx);
-                                },
-                            ))
-                            .child(Self::render_commit_dropdown_item(
-                                "Commit (Amend...)",
-                                cx,
-                                |this, window, cx| {
-                                    this.commit_dropdown_open = false;
-                                    this.open_amend_dialog(window, cx);
-                                },
-                            ))
-                            .child(div().my_1().mx_2().h_px().bg(rgb(BG_SURFACE1)))
-                            .child(Self::render_commit_dropdown_item(
-                                "Undo Last Commit",
-                                cx,
-                                |this, _, cx| {
-                                    this.commit_dropdown_open = false;
-                                    this.open_undo_commit_confirm(cx);
-                                },
-                            )),
-                    ),
+                    .child(if has_changes {
+                        self.render_commit_dropdown_menu(cx)
+                    } else {
+                        self.render_sync_dropdown_menu(cx)
+                    }),
             )
             .into_any_element()
+    }
+
+    fn render_commit_dropdown_menu(&self, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("commit-dropdown-menu")
+            .occlude()
+            .min_w_40()
+            .bg(rgb(BG_BASE))
+            .border_1()
+            .border_color(rgb(BG_SURFACE1))
+            .rounded_sm()
+            .shadow_lg()
+            .py_1()
+            .child(Self::render_commit_dropdown_item(
+                "Commit",
+                cx,
+                |this, window, cx| {
+                    this.commit_dropdown_open = false;
+                    this.open_commit_dialog(window, cx);
+                },
+            ))
+            .child(Self::render_commit_dropdown_item(
+                "Commit & Push",
+                cx,
+                |this, window, cx| {
+                    this.commit_dropdown_open = false;
+                    this.commit_and_push = true;
+                    this.open_commit_dialog(window, cx);
+                },
+            ))
+            .child(Self::render_commit_dropdown_item(
+                "Commit & Sync",
+                cx,
+                |this, window, cx| {
+                    this.commit_dropdown_open = false;
+                    this.commit_and_sync = true;
+                    this.open_commit_dialog(window, cx);
+                },
+            ))
+            .child(div().my_1().mx_2().h_px().bg(rgb(BG_SURFACE1)))
+            .child(Self::render_commit_dropdown_item(
+                "Commit (Amend...)",
+                cx,
+                |this, window, cx| {
+                    this.commit_dropdown_open = false;
+                    this.open_amend_dialog(window, cx);
+                },
+            ))
+            .child(Self::render_commit_dropdown_item(
+                "Undo Last Commit",
+                cx,
+                |this, _, cx| {
+                    this.commit_dropdown_open = false;
+                    this.open_undo_commit_confirm(cx);
+                },
+            ))
+    }
+
+    fn render_sync_dropdown_menu(&self, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("sync-dropdown-menu")
+            .occlude()
+            .min_w_40()
+            .bg(rgb(BG_BASE))
+            .border_1()
+            .border_color(rgb(BG_SURFACE1))
+            .rounded_sm()
+            .shadow_lg()
+            .py_1()
+            .child(Self::render_commit_dropdown_item(
+                "Pull",
+                cx,
+                |this, _, cx| {
+                    this.commit_dropdown_open = false;
+                    if let Some(path) = this
+                        .session_manager
+                        .active_session()
+                        .map(|s| s.worktree_path().to_path_buf())
+                    {
+                        this.git_pull_async(path, cx);
+                    }
+                },
+            ))
+            .child(Self::render_commit_dropdown_item(
+                "Push",
+                cx,
+                |this, _, cx| {
+                    this.commit_dropdown_open = false;
+                    if let Some(path) = this
+                        .session_manager
+                        .active_session()
+                        .map(|s| s.worktree_path().to_path_buf())
+                    {
+                        this.git_push_async(path, cx);
+                    }
+                },
+            ))
+            .child(Self::render_commit_dropdown_item(
+                "Sync",
+                cx,
+                |this, _, cx| {
+                    this.commit_dropdown_open = false;
+                    if let Some(path) = this
+                        .session_manager
+                        .active_session()
+                        .map(|s| s.worktree_path().to_path_buf())
+                    {
+                        this.git_sync_async(path, cx);
+                    }
+                },
+            ))
     }
 
     fn render_commit_dropdown_item(

@@ -179,65 +179,175 @@ impl SashikiApp {
                                         )
                                         .child("Stash"),
                                 )
-                                // Commit スプリットボタン: [Commit | ▾]
-                                // 左クリックで直接コミットダイアログ、右の▾でオプション選択
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_sm()
-                                        .bg(rgb(BG_SURFACE0))
-                                        .child(
-                                            div()
-                                                .id("files-commit-button")
-                                                .px_2()
-                                                .min_h(px(24.0))
-                                                .cursor_pointer()
-                                                .rounded_tl_sm()
-                                                .rounded_bl_sm()
-                                                .hover(|b| b.bg(rgb(BG_SURFACE1)))
-                                                .text_sm()
-                                                .text_color(rgb(GREEN))
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.commit_dropdown_open = false;
-                                                    this.open_commit_dialog(window, cx);
-                                                }))
-                                                .child(
-                                                    icon::git_commit()
-                                                        .size(px(14.0))
-                                                        .text_color(rgb(GREEN)),
-                                                )
-                                                .child("Commit"),
-                                        )
-                                        .child(div().w_px().h_4().bg(rgb(BG_SURFACE1)))
-                                        .child(
-                                            div()
-                                                .id("files-commit-dropdown-btn")
-                                                .size(px(24.0))
-                                                .cursor_pointer()
-                                                .rounded_tr_sm()
-                                                .rounded_br_sm()
-                                                .hover(|b| b.bg(rgb(BG_SURFACE1)))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.commit_dropdown_open =
-                                                        !this.commit_dropdown_open;
-                                                    cx.notify();
-                                                }))
-                                                .child(
-                                                    icon::chevron_down()
-                                                        .size(px(12.0))
-                                                        .text_color(rgb(GREEN)),
-                                                ),
-                                        ),
-                                ),
+                                .child(self.render_main_action_button(cx)),
                         )
                     }),
+            )
+    }
+
+    /// VSCode-style main action button that changes based on repository state:
+    /// - Changes exist → Commit (with dropdown: Commit & Push, Commit & Sync)
+    /// - No upstream → Publish Branch
+    /// - ahead/behind > 0 → Sync Changes N↓ M↑ (with dropdown: Push, Pull)
+    /// - Otherwise → Commit (disabled)
+    /// - Sync in progress → Syncing... (disabled, with sync icon)
+    fn render_main_action_button(&self, cx: &Context<Self>) -> Div {
+        let has_changes = !self.changed_files.is_empty();
+        let sync_in_progress = self.git_sync_in_progress;
+        let has_upstream = self.git_has_upstream;
+        let ahead = self.git_ahead;
+        let behind = self.git_behind;
+
+        // Sync in progress → spinning state
+        if sync_in_progress {
+            return self.render_action_split_button(
+                "action-syncing",
+                icon::sync().size(px(14.0)).text_color(rgb(BLUE)),
+                "Syncing...",
+                BLUE,
+                false, // disabled
+                |_, _, _| {},
+                cx,
+            );
+        }
+
+        // Changes exist → Commit
+        if has_changes {
+            return self.render_action_split_button(
+                "action-commit",
+                icon::git_commit().size(px(14.0)).text_color(rgb(GREEN)),
+                "Commit",
+                GREEN,
+                true,
+                |this, window, cx| {
+                    this.commit_dropdown_open = false;
+                    this.open_commit_dialog(window, cx);
+                },
+                cx,
+            );
+        }
+
+        // No upstream → Publish Branch
+        if !has_upstream {
+            return self.render_action_split_button(
+                "action-publish",
+                icon::cloud_upload().size(px(14.0)).text_color(rgb(BLUE)),
+                "Publish",
+                BLUE,
+                true,
+                |this, _, cx| {
+                    this.commit_dropdown_open = false;
+                    if let Some(path) = this
+                        .session_manager
+                        .active_session()
+                        .map(|s| s.worktree_path().to_path_buf())
+                    {
+                        this.git_push_async(path, cx);
+                    }
+                },
+                cx,
+            );
+        }
+
+        // Ahead/behind > 0 → Sync Changes
+        if ahead > 0 || behind > 0 {
+            let mut label = String::from("Sync");
+            if behind > 0 {
+                label.push_str(&format!(" {}↓", behind));
+            }
+            if ahead > 0 {
+                label.push_str(&format!(" {}↑", ahead));
+            }
+            return self.render_action_split_button(
+                "action-sync",
+                icon::sync().size(px(14.0)).text_color(rgb(BLUE)),
+                &label,
+                BLUE,
+                true,
+                |this, _, cx| {
+                    this.commit_dropdown_open = false;
+                    if let Some(path) = this
+                        .session_manager
+                        .active_session()
+                        .map(|s| s.worktree_path().to_path_buf())
+                    {
+                        this.git_sync_async(path, cx);
+                    }
+                },
+                cx,
+            );
+        }
+
+        // Default: Commit (disabled)
+        self.render_action_split_button(
+            "action-commit-disabled",
+            icon::git_commit()
+                .size(px(14.0))
+                .text_color(rgb(TEXT_MUTED)),
+            "Commit",
+            TEXT_MUTED,
+            false,
+            |_, _, _| {},
+            cx,
+        )
+    }
+
+    fn render_action_split_button(
+        &self,
+        id: &'static str,
+        icon_el: gpui::Svg,
+        label: &str,
+        color: u32,
+        enabled: bool,
+        on_click: impl Fn(&mut SashikiApp, &mut gpui::Window, &mut gpui::Context<SashikiApp>) + 'static,
+        cx: &Context<Self>,
+    ) -> Div {
+        let label_owned = label.to_string();
+        div()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .bg(rgb(BG_SURFACE0))
+            .child(
+                div()
+                    .id(id)
+                    .px_2()
+                    .min_h(px(24.0))
+                    .when(enabled, |b| {
+                        b.cursor_pointer().hover(|b| b.bg(rgb(BG_SURFACE1)))
+                    })
+                    .rounded_tl_sm()
+                    .rounded_bl_sm()
+                    .text_sm()
+                    .text_color(rgb(color))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(enabled, |b| {
+                        b.on_click(cx.listener(move |this, _, window, cx| {
+                            on_click(this, window, cx);
+                        }))
+                    })
+                    .child(icon_el)
+                    .child(label_owned),
+            )
+            .child(div().w_px().h_4().bg(rgb(BG_SURFACE1)))
+            .child(
+                div()
+                    .id("action-dropdown-btn")
+                    .size(px(24.0))
+                    .cursor_pointer()
+                    .rounded_tr_sm()
+                    .rounded_br_sm()
+                    .hover(|b| b.bg(rgb(BG_SURFACE1)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.commit_dropdown_open = !this.commit_dropdown_open;
+                        cx.notify();
+                    }))
+                    .child(icon::chevron_down().size(px(12.0)).text_color(rgb(color))),
             )
     }
 
