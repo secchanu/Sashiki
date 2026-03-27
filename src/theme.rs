@@ -4,7 +4,12 @@
 //! Usage: `rgb(theme::BG_BASE)` or `rgba(theme::OVERLAY)`
 
 // Monospace font for terminal and code display
+#[cfg(target_os = "macos")]
+pub const MONOSPACE_FONT: &str = "Menlo";
+#[cfg(target_os = "windows")]
 pub const MONOSPACE_FONT: &str = "Consolas";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const MONOSPACE_FONT: &str = "DejaVu Sans Mono";
 
 // Background colors (RGB format: 0xRRGGBB, use with rgb())
 // From yukidama-ui neutral palette (dark mode)
