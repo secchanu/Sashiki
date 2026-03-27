@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Create app bundle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p Sashiki.app/Contents/MacOS
+          cp target/release/sashiki Sashiki.app/Contents/MacOS/
+          cat > Sashiki.app/Contents/Info.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>
+            <string>sashiki</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.sashiki.app</string>
+            <key>CFBundleName</key>
+            <string>Sashiki</string>
+            <key>CFBundleVersion</key>
+            <string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Create DMG
+        run: hdiutil create -volname "Sashiki" -srcfolder Sashiki.app -ov -format UDZO Sashiki-macos.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sashiki-macos
+          path: Sashiki-macos.dmg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Create archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path Sashiki -Force
+          Copy-Item target/release/sashiki.exe -Destination Sashiki/
+          Compress-Archive -Path Sashiki -DestinationPath Sashiki-windows.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sashiki-windows
+          path: Sashiki-windows.zip
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sashiki-macos
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sashiki-windows
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Sashiki-macos.dmg
+            Sashiki-windows.zip
+          generate_release_notes: true
