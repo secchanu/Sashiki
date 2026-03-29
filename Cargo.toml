@@ -1,6 +1,6 @@
 [package]
 name = "sashiki"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Sashiki - Terminals for each worktree. All in one place."
 license = "MIT"
