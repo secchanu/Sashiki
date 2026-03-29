@@ -32,7 +32,7 @@ impl SashikiApp {
     fn render_sidebar_header(
         &self,
         layout_mode: LayoutMode,
-        _cx: &Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         div()
             .h_8()
@@ -48,26 +48,71 @@ impl SashikiApp {
                     .text_color(rgb(BLUE))
                     .text_sm()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .child(if layout_mode == LayoutMode::Parallel {
-                        "Select Sessions"
-                    } else {
-                        "Sessions"
-                    }),
+                    .child("Sessions"),
             )
-            .child(div().text_color(rgb(TEXT_MUTED)).text_xs().child(
-                if layout_mode == LayoutMode::Parallel {
-                    format!(
-                        "{} selected",
-                        self.session_manager.parallel_sessions().len()
-                    )
-                } else {
-                    format!(
-                        "{}/{}",
-                        self.session_manager.running_session_count(),
-                        self.session_manager.sessions().len()
-                    )
-                },
-            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(layout_mode == LayoutMode::Parallel, |el| {
+                        el.child(div().text_color(rgb(TEXT_MUTED)).text_xs().child(format!(
+                            "{}/{}",
+                            self.session_manager.parallel_sessions().len(),
+                            self.session_manager.sessions().len()
+                        )))
+                    })
+                    .child(
+                        div()
+                            .id("toggle-parallel")
+                            .px_1()
+                            .min_h(px(20.0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .bg(if layout_mode == LayoutMode::Parallel {
+                                rgb(BLUE)
+                            } else {
+                                rgb(BG_SURFACE0)
+                            })
+                            .hover(|this| this.bg(rgb(BG_SURFACE2)))
+                            .text_xs()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.session_manager.toggle_layout_mode();
+                                cx.notify();
+                            }))
+                            .child(
+                                if layout_mode == LayoutMode::Parallel {
+                                    icon::layout_grid()
+                                } else {
+                                    icon::layout_single()
+                                }
+                                .size(px(12.0))
+                                .text_color(
+                                    if layout_mode == LayoutMode::Parallel {
+                                        rgb(BG_BASE)
+                                    } else {
+                                        rgb(TEXT_MUTED)
+                                    },
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_color(if layout_mode == LayoutMode::Parallel {
+                                        rgb(BG_BASE)
+                                    } else {
+                                        rgb(TEXT_MUTED)
+                                    })
+                                    .child(if layout_mode == LayoutMode::Parallel {
+                                        "Parallel"
+                                    } else {
+                                        "Single"
+                                    }),
+                            ),
+                    ),
+            )
     }
 
     fn render_group_section(

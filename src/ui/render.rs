@@ -2,7 +2,6 @@
 
 use crate::app::{MenuId, ResizeDrag, SashikiApp};
 use crate::dialog::ActiveDialog;
-use crate::icon;
 use crate::session::LayoutMode;
 use crate::theme::*;
 use gpui::{
@@ -19,8 +18,6 @@ impl Focusable for SashikiApp {
 impl Render for SashikiApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let layout_mode = self.session_manager.layout_mode();
-        let session_count = self.session_manager.len();
-        let running_session_count = self.session_manager.running_session_count();
 
         div()
             .size_full()
@@ -39,7 +36,7 @@ impl Render for SashikiApp {
             .on_action(cx.listener(Self::on_open_commit_dialog))
             .on_action(cx.listener(Self::on_open_stash_dialog))
             .on_action(cx.listener(Self::on_close_active_group))
-            .child(self.render_header(layout_mode, session_count, running_session_count, cx))
+            .child(self.render_header(cx))
             .child(self.render_main_content(layout_mode, cx))
             .when(self.open_menu.is_some(), |this| {
                 this.child(self.render_menu_overlay(cx))
@@ -155,23 +152,15 @@ impl Render for SashikiApp {
 }
 
 impl SashikiApp {
-    fn render_header(
-        &self,
-        layout_mode: LayoutMode,
-        session_count: usize,
-        running_session_count: usize,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
+    fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
             .h_8()
             .px_2()
             .flex()
             .items_center()
-            .justify_between()
             .bg(rgb(BG_SURFACE0))
             .text_color(rgb(TEXT))
             .child(
-                // Left: global menu bar
                 div()
                     .flex()
                     .items_center()
@@ -179,64 +168,6 @@ impl SashikiApp {
                     .child(self.render_menu_button("Sashiki", MenuId::App, cx))
                     .child(self.render_menu_button("File", MenuId::File, cx))
                     .child(self.render_menu_button("View", MenuId::View, cx)),
-            )
-            .child(
-                // Center: toolbar (session status)
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id("toggle-parallel")
-                            .px_2()
-                            .min_h(px(24.0))
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .bg(if layout_mode == LayoutMode::Parallel {
-                                rgb(BLUE)
-                            } else {
-                                rgb(BG_SURFACE0)
-                            })
-                            .text_color(if layout_mode == LayoutMode::Parallel {
-                                rgb(BG_BASE)
-                            } else {
-                                rgb(TEXT)
-                            })
-                            .hover(|this| this.bg(rgb(BG_SURFACE2)))
-                            .text_sm()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.session_manager.toggle_layout_mode();
-                                cx.notify();
-                            }))
-                            .child(
-                                if layout_mode == LayoutMode::Parallel {
-                                    icon::layout_grid()
-                                } else {
-                                    icon::layout_single()
-                                }
-                                .size(px(14.0))
-                                .text_color(
-                                    if layout_mode == LayoutMode::Parallel {
-                                        rgb(BG_BASE)
-                                    } else {
-                                        rgb(TEXT)
-                                    },
-                                ),
-                            )
-                            .child(if layout_mode == LayoutMode::Parallel {
-                                "Parallel"
-                            } else {
-                                "Single"
-                            }),
-                    )
-                    .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(format!(
-                        "{}/{} running",
-                        running_session_count, session_count
-                    ))),
             )
     }
 
