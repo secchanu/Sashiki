@@ -1,192 +1,160 @@
-//! Terminal emulator using alacritty_terminal
-//!
-//! This module provides terminal functionality integrated with GPUI.
+//! Terminal emulator built on libghostty-vt.
 //!
 //! ## Module structure
-//! - `view`: Main TerminalView struct, initialization, mouse/IME handling, Render
-//! - `keybindings`: Action definitions, key bindings, action handlers
+//! - `vt`: terminal state thread owning the libghostty-vt handles
+//! - `pty`: pseudo terminal process management
+//! - `frame`: owned viewport snapshot shared with the renderer
+//! - `input`: translation from GPUI key events to libghostty-vt key events
+//! - `view`: main TerminalView struct, mouse/IME handling, Render
+//! - `keybindings`: action definitions, key bindings, action handlers
 //! - `element`: TerminalElement for custom GPUI rendering
 
 mod element;
+mod frame;
+mod input;
 mod input_probe;
 mod keybindings;
+mod pty;
 mod view;
+mod vt;
 
 pub use view::TerminalView;
 
-use alacritty_terminal::event::{Event as AlacEvent, EventListener, Notify, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
-use alacritty_terminal::grid::Scroll;
-use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
-use alacritty_terminal::tty;
-use std::sync::Arc;
+use frame::Frame;
+use std::sync::Mutex;
+use vt::{MouseInput, VtCommand};
 
-pub struct Terminal {
-    term: Arc<FairMutex<Term<TerminalEventListener>>>,
-    pty_tx: Notifier,
-    /// Current terminal size (cols, lines) for deduplication
-    current_size: std::sync::Mutex<(u16, u16)>,
-}
-
-#[derive(Clone)]
-pub struct TerminalEventListener {
-    sender: smol::channel::Sender<TerminalEvent>,
-}
-
-impl EventListener for TerminalEventListener {
-    fn send_event(&self, event: AlacEvent) {
-        let terminal_event = match event {
-            AlacEvent::Wakeup => TerminalEvent::Wakeup,
-            AlacEvent::Bell => TerminalEvent::Bell,
-            AlacEvent::Exit => TerminalEvent::Exit,
-            AlacEvent::Title(title) => TerminalEvent::Title(title),
-            AlacEvent::ClipboardStore(_, text) => TerminalEvent::ClipboardStore(text),
-            AlacEvent::ClipboardLoad(_, formatter) => TerminalEvent::ClipboardLoad(formatter),
-            _ => return,
-        };
-        // Ignore send failure - channel full or receiver dropped is non-fatal
-        let _ = self.sender.try_send(terminal_event);
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum TerminalEvent {
+    /// A new frame is available.
     Wakeup,
     Bell,
     Exit,
     Title(String),
-    ClipboardStore(String),
-    ClipboardLoad(Arc<dyn Fn(&str) -> String + Sync + Send + 'static>),
+    /// The terminal application asked for text to be put on the clipboard.
+    ClipboardWrite(String),
+    /// Result of a selection copy request.
+    Copy(String),
 }
 
-impl std::fmt::Debug for TerminalEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Wakeup => f.write_str("Wakeup"),
-            Self::Bell => f.write_str("Bell"),
-            Self::Exit => f.write_str("Exit"),
-            Self::Title(title) => f.debug_tuple("Title").field(title).finish(),
-            Self::ClipboardStore(text) => f.debug_tuple("ClipboardStore").field(text).finish(),
-            Self::ClipboardLoad(_) => f.write_str("ClipboardLoad(<formatter>)"),
-        }
-    }
+/// Handle to a running terminal. All operations are messages to the VT thread,
+/// because libghostty-vt state cannot be touched from the UI thread.
+pub struct Terminal {
+    handle: vt::VtHandle,
+    /// Last requested size, used to skip redundant resize messages.
+    size: Mutex<(u16, u16)>,
+    killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
 }
 
 impl Terminal {
     pub fn new(
         working_directory: Option<std::path::PathBuf>,
     ) -> anyhow::Result<(Self, smol::channel::Receiver<TerminalEvent>)> {
-        // Buffer size 100 allows burst of terminal events without blocking PTY thread
+        // Buffer size 100 allows a burst of terminal events without blocking
+        // the VT thread.
         let (event_tx, event_rx) = smol::channel::bounded(100);
-        let listener = TerminalEventListener { sender: event_tx };
-
-        let config = TermConfig::default();
-        // 80x24 is the VT100 standard terminal size, used as initial default
-        let term_size = TermSize::new(80, 24);
-        let term = Term::new(config, &term_size, listener.clone());
-        let term = Arc::new(FairMutex::new(term));
-
-        let pty_config = tty::Options {
-            shell: None,
-            working_directory,
-            env: std::collections::HashMap::new(),
-            ..Default::default()
-        };
-
-        // Initial PTY window size. Cell dimensions (10x20) are placeholder values;
-        // actual rendering calculates precise dimensions from font metrics.
-        // These values are used by the PTY for initial SIGWINCH reporting.
-        let window_size = WindowSize {
-            num_lines: 24,
-            num_cols: 80,
-            cell_width: 10,
-            cell_height: 20,
-        };
-
-        // window_id parameter (0) is unused on Windows
-        let pty = tty::new(&pty_config, window_size, 0)?;
-
-        let event_loop =
-            EventLoop::new(term.clone(), listener, pty, pty_config.drain_on_exit, false)?;
-
-        let pty_tx = Notifier(event_loop.channel());
-        // Thread handle intentionally dropped - PTY thread runs until Terminal is dropped
-        // and channel closes, at which point it exits naturally
-        let _pty_thread = event_loop.spawn();
+        let handle = vt::spawn(working_directory, event_tx)?;
+        let killer = Mutex::new(handle.killer.clone_killer());
 
         Ok((
             Self {
-                term,
-                pty_tx,
-                current_size: std::sync::Mutex::new((80, 24)),
+                handle,
+                size: Mutex::new((0, 0)),
+                killer,
             },
             event_rx,
         ))
     }
 
-    pub fn write(&self, input: &[u8]) {
-        self.pty_tx.notify(input.to_vec());
+    fn send(&self, command: VtCommand) {
+        // A closed channel means the terminal already exited.
+        let _ = self.handle.commands.try_send(command);
     }
 
-    pub fn mode(&self) -> TermMode {
-        let term = self.term.lock();
-        *term.mode()
+    /// Take the most recent frame, if one was published since the last call.
+    pub(super) fn take_frame(&self) -> Option<Frame> {
+        self.handle.frame.lock().ok()?.take()
     }
 
-    /// Send exit command to the shell to terminate the PTY process
-    pub fn shutdown(&self) {
-        // Send "exit" command to terminate the shell
-        // This works for cmd.exe, powershell, bash, etc.
-        self.pty_tx.notify(b"exit\r".to_vec());
-        // PTY EventLoopスレッドをシャットダウンしてPTYプロセスを強制終了する。
-        // graceful exitだけではWindowsでファイルハンドルが残りディレクトリ削除が失敗するため。
-        let _ = self.pty_tx.0.send(Msg::Shutdown);
+    pub fn write(&self, data: &[u8]) {
+        self.send(VtCommand::Write(data.to_vec()));
     }
 
-    /// Resize the terminal to new dimensions
-    pub fn resize(&self, cols: u16, lines: u16, cell_width: u16, cell_height: u16) {
-        // Check if size actually changed
+    pub(super) fn key(&self, input: vt::KeyInput) {
+        self.send(VtCommand::Key(input));
+    }
+
+    pub(super) fn paste(&self, text: String) {
+        self.send(VtCommand::Paste(text));
+    }
+
+    pub(super) fn mouse_down(&self, input: MouseInput, click_count: u8) {
+        self.send(VtCommand::MouseDown { input, click_count });
+    }
+
+    pub(super) fn mouse_drag(&self, input: MouseInput) {
+        self.send(VtCommand::MouseDrag(input));
+    }
+
+    pub(super) fn mouse_up(&self, input: MouseInput) {
+        self.send(VtCommand::MouseUp(input));
+    }
+
+    pub(super) fn mouse_move(&self, input: MouseInput) {
+        self.send(VtCommand::MouseMove(input));
+    }
+
+    pub(super) fn scroll(&self, input: MouseInput, lines: i32) {
+        self.send(VtCommand::Scroll { input, lines });
+    }
+
+    pub(super) fn scroll_lines(&self, lines: i32) {
+        self.send(VtCommand::ScrollLines(lines));
+    }
+
+    pub(super) fn clear_selection(&self) {
+        self.send(VtCommand::ClearSelection);
+    }
+
+    pub(super) fn copy_selection(&self) {
+        self.send(VtCommand::CopySelection);
+    }
+
+    pub(super) fn set_focused(&self, focused: bool) {
+        self.send(VtCommand::Focus(focused));
+    }
+
+    /// Resize the terminal grid. Redundant sizes are dropped so that layout
+    /// passes do not flood the VT thread.
+    pub fn resize(&self, cols: u16, rows: u16, cell_width: u16, cell_height: u16, padding: u16) {
         {
-            let Ok(mut current) = self.current_size.lock() else {
-                eprintln!("Warning: Terminal size mutex poisoned, skipping resize");
+            let Ok(mut size) = self.size.lock() else {
                 return;
             };
-            if current.0 == cols && current.1 == lines {
+            if *size == (cols, rows) {
                 return;
             }
-            *current = (cols, lines);
+            *size = (cols, rows);
         }
 
-        let size = WindowSize {
-            num_cols: cols,
-            num_lines: lines,
+        self.send(VtCommand::Resize {
+            cols,
+            rows,
             cell_width,
             cell_height,
-        };
+            padding,
+        });
+    }
 
-        // Resize the terminal grid
-        {
-            let mut term = self.term.lock();
-            term.resize(TermSize::new(cols as usize, lines as usize));
+    /// Terminate the shell and release the pty.
+    ///
+    /// The child is killed on the calling thread so that its handles are gone
+    /// by the time the caller removes the working directory, which Windows
+    /// requires before a directory can be deleted.
+    pub fn shutdown(&self) {
+        if let Ok(mut killer) = self.killer.lock() {
+            let _ = killer.kill();
         }
-
-        // Notify PTY of size change
-        let _ = self.pty_tx.0.send(Msg::Resize(size));
-    }
-
-    /// Scroll the terminal viewport
-    pub fn scroll(&self, scroll: Scroll) {
-        let mut term = self.term.lock();
-        term.scroll_display(scroll);
-    }
-
-    pub fn with_term<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&Term<TerminalEventListener>) -> R,
-    {
-        let term = self.term.lock();
-        f(&term)
+        self.send(VtCommand::Shutdown);
     }
 }

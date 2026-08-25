@@ -36,7 +36,6 @@ pub const MAUVE: u32 = 0xb494d9; // secondary[400] - purple
 pub const TEAL: u32 = 0x52b8b2; // accent[400] - cyan
 pub const PEACH: u32 = 0xd69e5b; // warning[300] - lighter amber
 pub const PINK: u32 = 0xb79dd7; // secondary[300] - lighter purple
-pub const ROSEWATER: u32 = 0xa4acb4; // neutral[300] - soft highlight
 pub const MAROON: u32 = 0xeb8e82; // error[300] - soft red
 pub const SAPPHIRE: u32 = 0x83afe0; // primary[300] - light blue
 pub const SKY: u32 = 0x6bbbb6; // accent[300] - light teal

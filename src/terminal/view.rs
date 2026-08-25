@@ -3,24 +3,24 @@
 //! This module provides the main TerminalView struct and its implementation.
 
 use super::Terminal;
-use super::input_probe;
-use crate::terminal::TerminalEvent;
-use crate::terminal::element::{
+use super::element::{
     DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, MULTI_CLICK_THRESHOLD_MS, SCROLL_LINES_WHEEL,
-    TERMINAL_PADDING, TerminalElement, TerminalLayout,
+    TERMINAL_PADDING, TerminalElement, TerminalLayout, rgb_to_hsla,
 };
-use crate::theme::{self, *};
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
-use alacritty_terminal::term::{TermMode, cell::Flags as CellFlags};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
+use super::frame::{CellWidth, Frame};
+use super::input;
+use super::input_probe;
+use super::vt::MouseInput;
+use crate::terminal::TerminalEvent;
+use crate::theme::*;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, AsyncApp, Bounds, ClipboardItem, Context, EntityInputHandler, FocusHandle, Focusable,
-    Hsla, InteractiveElement, IntoElement, MouseButton, MouseMoveEvent, ParentElement, Pixels,
+    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseMoveEvent, ParentElement, Pixels,
     Point, Render, ScrollWheelEvent, Size, Styled, Subscription, UTF16Selection, WeakEntity,
     Window, div, px, rgb,
 };
+use libghostty_vt::mouse;
 use regex::Regex;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -37,40 +37,6 @@ pub(super) struct DetectedUrl {
     pub url: String,
 }
 
-/// Cached cell data from terminal grid.
-/// Stores raw AnsiColor to keep cache updates cheap (no float conversion).
-/// Color conversion to Hsla happens once per frame in paint_cells.
-#[derive(Clone)]
-pub(super) struct CachedCell {
-    pub c: char,
-    pub fg: AnsiColor,
-    pub bg: AnsiColor,
-    pub flags: CellFlags,
-}
-
-/// Cached terminal content snapshot.
-/// Cells are wrapped in `Arc` so that `TerminalLayout` can share them
-/// without a deep copy (Arc::clone is O(1) vs O(rows×cols) for Vec clone).
-#[derive(Clone)]
-struct CachedContent {
-    cells: Arc<Vec<Vec<CachedCell>>>,
-    /// Cursor position (line, column) in grid coordinates
-    cursor: (i32, usize),
-    cursor_shape: CursorShape,
-    cursor_visible: bool,
-    display_offset: i32,
-    lines: usize,
-}
-
-/// Selection state for text selection in the terminal
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct TerminalSelection {
-    /// Start point (line, column)
-    pub(super) start: (i32, usize),
-    /// End point (line, column)
-    pub(super) end: (i32, usize),
-}
-
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PendingCtrlCState {
     pub armed_at: Instant,
@@ -84,36 +50,6 @@ struct PendingAccessibilityCommit {
     armed_at: Instant,
 }
 
-impl TerminalSelection {
-    /// Returns the selection normalized so start <= end
-    fn normalized(&self) -> (i32, usize, i32, usize) {
-        let (start_line, start_col) = self.start;
-        let (end_line, end_col) = self.end;
-        if start_line < end_line || (start_line == end_line && start_col <= end_col) {
-            (start_line, start_col, end_line, end_col)
-        } else {
-            (end_line, end_col, start_line, start_col)
-        }
-    }
-
-    /// Check if a position is within the selection
-    pub(super) fn contains(&self, line: i32, col: usize) -> bool {
-        let (start_line, start_col, end_line, end_col) = self.normalized();
-        if line < start_line || line > end_line {
-            return false;
-        }
-        if line == start_line && line == end_line {
-            col >= start_col && col <= end_col
-        } else if line == start_line {
-            col >= start_col
-        } else if line == end_line {
-            col <= end_col
-        } else {
-            true
-        }
-    }
-}
-
 pub struct TerminalView {
     pub(super) terminal: Option<Arc<Terminal>>,
     pub(super) focus_handle: FocusHandle,
@@ -124,8 +60,8 @@ pub struct TerminalView {
     pub title: Option<String>,
     /// Whether bell was recently triggered (for UI visual feedback)
     pub bell_active: bool,
-    /// Current text selection (if any)
-    selection: Option<TerminalSelection>,
+    /// Most recent viewport snapshot published by the terminal thread
+    frame: Option<Frame>,
     /// Whether mouse is currently dragging for selection
     is_dragging: bool,
     /// Last click time for double/triple click detection
@@ -137,9 +73,6 @@ pub struct TerminalView {
     pub(super) cell_height: f32,
     /// Terminal content origin for mouse coordinate conversion
     pub(super) content_origin: (f32, f32),
-    /// Cached terminal content to ensure consistent state during rendering.
-    /// Updated after all events are processed, used by build_layout().
-    cached_content: Option<CachedContent>,
     /// URLs detected in the current terminal content
     pub(super) detected_urls: Vec<DetectedUrl>,
     /// (screen_line, col) → detected_urls index for O(1) URL lookup during layout build.
@@ -240,12 +173,11 @@ impl TerminalView {
                                 if let Some(this) = this.upgrade() {
                                     this.update(cx, move |view, cx: &mut Context<TerminalView>| {
                                         let mut need_notify = false;
-                                        let mut need_cache_refresh = false;
 
                                         for event in events {
                                             match event {
                                                 TerminalEvent::Wakeup => {
-                                                    need_cache_refresh = true;
+                                                    view.take_frame();
                                                     need_notify = true;
                                                 }
                                                 TerminalEvent::Bell => {
@@ -254,36 +186,22 @@ impl TerminalView {
                                                 }
                                                 TerminalEvent::Exit => {
                                                     // Terminal exited - handled elsewhere.
-                                                    need_cache_refresh = true;
+                                                    view.take_frame();
                                                     need_notify = true;
                                                 }
                                                 TerminalEvent::Title(title) => {
                                                     view.title = Some(title);
                                                     need_notify = true;
                                                 }
-                                                TerminalEvent::ClipboardStore(text) => {
+                                                TerminalEvent::ClipboardWrite(text)
+                                                | TerminalEvent::Copy(text) => {
                                                     cx.write_to_clipboard(
                                                         ClipboardItem::new_string(text),
                                                     );
                                                 }
-                                                TerminalEvent::ClipboardLoad(formatter) => {
-                                                    if let Some(content) = cx
-                                                        .read_from_clipboard()
-                                                        .and_then(|c| c.text())
-                                                    {
-                                                        let response = formatter(&content);
-                                                        view.write_to_terminal(response.as_bytes());
-                                                    } else {
-                                                        let response = formatter("");
-                                                        view.write_to_terminal(response.as_bytes());
-                                                    }
-                                                }
                                             }
                                         }
 
-                                        if need_cache_refresh {
-                                            view.update_content_cache();
-                                        }
                                         if need_notify {
                                             cx.notify();
                                         }
@@ -301,68 +219,50 @@ impl TerminalView {
                 )
                 .detach();
 
-                let mut view = Self {
-                    terminal: Some(terminal),
-                    focus_handle,
-                    preedit_text: String::new(),
-                    error_message: None,
-                    title: None,
-                    bell_active: false,
-                    selection: None,
-                    is_dragging: false,
-                    last_click_time: None,
-                    click_count: 0,
-                    cell_width: DEFAULT_CELL_WIDTH,
-                    cell_height: DEFAULT_CELL_HEIGHT,
-                    content_origin: (0.0, 0.0),
-                    cached_content: None,
-                    detected_urls: Vec::new(),
-                    url_cells: Arc::new(HashMap::new()),
-                    hovered_url_index: None,
-                    ctrl_held: false,
-                    pending_ctrl_c: None,
-                    input_cursor_bounds: None,
-                    input_shadow_text: String::new(),
-                    recent_committed_range: None,
-                    pending_accessibility_commit: None,
-                    focus_in_subscription: None,
-                    focus_out_subscription: None,
-                };
-                // Capture initial terminal state so build_layout always has cached data
-                view.update_content_cache();
-                view
+                Self::with_terminal(Some(terminal), focus_handle, None)
             }
-            Err(e) => Self {
-                terminal: None,
+            Err(e) => Self::with_terminal(
+                None,
                 focus_handle,
-                preedit_text: String::new(),
-                error_message: Some(format!("Failed to create terminal: {}", e)),
-                title: None,
-                bell_active: false,
-                selection: None,
-                is_dragging: false,
-                last_click_time: None,
-                click_count: 0,
-                cell_width: DEFAULT_CELL_WIDTH,
-                cell_height: DEFAULT_CELL_HEIGHT,
-                content_origin: (0.0, 0.0),
-                cached_content: None,
-                detected_urls: Vec::new(),
-                url_cells: Arc::new(HashMap::new()),
-                hovered_url_index: None,
-                ctrl_held: false,
-                pending_ctrl_c: None,
-                input_cursor_bounds: None,
-                input_shadow_text: String::new(),
-                recent_committed_range: None,
-                pending_accessibility_commit: None,
-                focus_in_subscription: None,
-                focus_out_subscription: None,
-            },
+                Some(format!("Failed to create terminal: {}", e)),
+            ),
         }
     }
 
-    /// Shutdown the terminal by sending exit command to the shell
+    fn with_terminal(
+        terminal: Option<Arc<Terminal>>,
+        focus_handle: FocusHandle,
+        error_message: Option<String>,
+    ) -> Self {
+        Self {
+            terminal,
+            focus_handle,
+            preedit_text: String::new(),
+            error_message,
+            title: None,
+            bell_active: false,
+            frame: None,
+            is_dragging: false,
+            last_click_time: None,
+            click_count: 0,
+            cell_width: DEFAULT_CELL_WIDTH,
+            cell_height: DEFAULT_CELL_HEIGHT,
+            content_origin: (0.0, 0.0),
+            detected_urls: Vec::new(),
+            url_cells: Arc::new(HashMap::new()),
+            hovered_url_index: None,
+            ctrl_held: false,
+            pending_ctrl_c: None,
+            input_cursor_bounds: None,
+            input_shadow_text: String::new(),
+            recent_committed_range: None,
+            pending_accessibility_commit: None,
+            focus_in_subscription: None,
+            focus_out_subscription: None,
+        }
+    }
+
+    /// Shutdown the terminal by terminating the shell
     pub fn shutdown(&self) {
         if let Some(ref terminal) = self.terminal {
             terminal.shutdown();
@@ -381,97 +281,96 @@ impl TerminalView {
         }
     }
 
-    /// Paste text to terminal, wrapping with bracketed paste sequences if enabled.
-    /// Bracketed paste (DECSET 2004) lets the shell distinguish pasted text from typed text.
+    /// Send a translated key event to the terminal.
+    pub(super) fn send_key(&self, keystroke: &gpui::Keystroke) -> bool {
+        let Some(ref terminal) = self.terminal else {
+            return false;
+        };
+        let Some(input) = input::key_input(keystroke, !self.preedit_text.is_empty()) else {
+            return false;
+        };
+        terminal.key(input);
+        true
+    }
+
+    /// Paste text into the terminal. Bracketed paste and control byte
+    /// stripping are handled by libghostty-vt.
     pub(super) fn paste_text(&mut self, text: &str) {
         Self::trace_input_event(format!("paste_text called len={}", text.len()));
         self.cancel_pending_ctrl_c();
 
-        if self.is_mode_set(TermMode::BRACKETED_PASTE) {
-            // Strip ESC from pasted content to prevent escape sequence injection.
-            let mut data = b"\x1b[200~".to_vec();
-            let sanitized = text.replace('\x1b', "");
-            data.extend_from_slice(sanitized.as_bytes());
-            data.extend_from_slice(b"\x1b[201~");
-            self.write_to_terminal(&data);
-            self.update_input_shadow_text(&sanitized);
-        } else {
-            self.write_to_terminal(text.as_bytes());
-            self.update_input_shadow_text(text);
+        if let Some(ref terminal) = self.terminal {
+            terminal.paste(text.to_string());
         }
+        self.update_input_shadow_text(text);
         self.arm_accessibility_commit(text);
     }
 
-    pub(super) fn is_mode_set(&self, mode: TermMode) -> bool {
-        self.terminal
+    pub(super) fn is_alt_screen(&self) -> bool {
+        self.frame
             .as_ref()
-            .map(|t| t.mode().contains(mode))
+            .map(|frame| frame.alt_screen)
             .unwrap_or(false)
+    }
+
+    pub(super) fn has_selection(&self) -> bool {
+        self.frame
+            .as_ref()
+            .map(|frame| frame.has_selection)
+            .unwrap_or(false)
+    }
+
+    fn mouse_tracking(&self) -> bool {
+        self.frame
+            .as_ref()
+            .map(|frame| frame.mouse_tracking)
+            .unwrap_or(false)
+    }
+
+    /// Copy the current selection to the clipboard. The text arrives
+    /// asynchronously as `TerminalEvent::Copy`.
+    pub(super) fn copy_selection(&self) {
+        if let Some(ref terminal) = self.terminal {
+            terminal.copy_selection();
+        }
+    }
+
+    pub(super) fn clear_selection(&self) {
+        if let Some(ref terminal) = self.terminal {
+            terminal.clear_selection();
+        }
     }
 
     /// Number of lines to scroll per page (Shift+PageUp/Down).
     /// Uses current screen height minus 1 (standard terminal behavior),
-    /// falling back to 10 lines if terminal size is unknown.
+    /// falling back to 10 lines if no frame has arrived yet.
     pub(super) fn page_scroll_lines(&self) -> i32 {
-        self.cached_content
+        self.frame
             .as_ref()
-            .map(|c| (c.lines as i32).saturating_sub(1).max(1))
+            .map(|frame| (frame.line_count() as i32).saturating_sub(1).max(1))
             .unwrap_or(10)
     }
 
-    /// Update cached content from terminal.
-    /// Called after event processing to capture the complete terminal state.
-    /// Similar to Zed's make_content() - captures all cells, cursor, and display state.
-    pub(super) fn update_content_cache(&mut self) {
+    pub(super) fn scroll_lines(&self, lines: i32) {
+        if let Some(ref terminal) = self.terminal {
+            terminal.scroll_lines(lines);
+        }
+    }
+
+    /// Adopt the newest frame published by the terminal thread.
+    fn take_frame(&mut self) {
         let Some(ref terminal) = self.terminal else {
             return;
         };
-
-        terminal.with_term(|term| {
-            let render_content = term.renderable_content();
-            let cursor_point = render_content.cursor.point;
-            let cursor_shape = render_content.cursor.shape;
-            let display_offset = render_content.display_offset as i32;
-
-            let grid = term.grid();
-            let cols = grid.columns();
-            let lines = grid.screen_lines();
-
-            // Copy raw cell data without color conversion.
-            // Conversion to Hsla is deferred to paint_cells (runs once per frame).
-            let mut cells = Vec::with_capacity(lines);
-            for line_idx in 0..lines {
-                let actual_line = line_idx as i32 - display_offset;
-                let mut row = Vec::with_capacity(cols);
-                for col_idx in 0..cols {
-                    let point = AlacPoint::new(Line(actual_line), Column(col_idx));
-                    let cell = &grid[point];
-                    row.push(CachedCell {
-                        c: cell.c,
-                        fg: cell.fg,
-                        bg: cell.bg,
-                        flags: cell.flags,
-                    });
-                }
-                cells.push(row);
-            }
-
-            let cursor_visible = term.mode().contains(TermMode::SHOW_CURSOR);
-
-            self.cached_content = Some(CachedContent {
-                cells: Arc::new(cells),
-                cursor: (cursor_point.line.0, cursor_point.column.0),
-                cursor_shape,
-                cursor_visible,
-                display_offset,
-                lines,
-            });
-        });
+        let Some(frame) = terminal.take_frame() else {
+            return;
+        };
+        self.frame = Some(frame);
 
         // Only run URL detection when Ctrl is held; URLs are only needed for Ctrl+click.
         // During AI streaming this avoids scanning all terminal rows on every wakeup.
         if self.ctrl_held {
-            self.detect_urls_from_cache();
+            self.detect_urls_from_frame();
         }
         self.resolve_pending_accessibility_commit();
     }
@@ -532,22 +431,14 @@ impl TerminalView {
     }
 
     fn visible_text_contains(&self, needle: &str) -> bool {
-        let Some(cached) = self.cached_content.as_ref() else {
+        let Some(frame) = self.frame.as_ref() else {
             return false;
         };
         if needle.is_empty() {
             return false;
         }
 
-        cached.cells.iter().any(|row| {
-            let line: String = row
-                .iter()
-                // Skip NUL spacer cells used for wide chars (CJK), otherwise
-                // "こんにちは" becomes "こ ん に ち は" and commit detection fails.
-                .filter_map(|cell| (cell.c != '\0').then_some(cell.c))
-                .collect();
-            line.contains(needle)
-        })
+        frame.rows.iter().any(|row| row.text().contains(needle))
     }
 
     fn update_input_shadow_text(&mut self, text: &str) {
@@ -598,25 +489,29 @@ impl TerminalView {
         text[start..end].to_string()
     }
 
-    /// Scan cached content for URLs using regex and record their screen positions.
-    pub(super) fn detect_urls_from_cache(&mut self) {
+    /// Scan the current frame for URLs and record their viewport positions.
+    pub(super) fn detect_urls_from_frame(&mut self) {
         self.detected_urls.clear();
 
-        let Some(ref cached) = self.cached_content else {
+        let Some(frame) = self.frame.as_ref() else {
             self.url_cells = Arc::new(HashMap::new());
             return;
         };
 
         let mut url_cells = HashMap::new();
-        // Reuse a single String buffer to avoid allocating one per row
-        let mut line_text = String::new();
+        let mut detected = Vec::new();
 
-        for (line_idx, row) in cached.cells.iter().enumerate() {
-            line_text.clear();
-            line_text.extend(
-                row.iter()
-                    .map(|cell| if cell.c == '\0' { ' ' } else { cell.c }),
-            );
+        for (line_idx, row) in frame.rows.iter().enumerate() {
+            // Column indices must line up with the rendered grid, so spacer
+            // cells are kept as placeholders rather than dropped.
+            let line_text: String = row
+                .cells
+                .iter()
+                .map(|cell| match cell.width {
+                    CellWidth::Spacer => ' ',
+                    _ => cell.ch,
+                })
+                .collect();
 
             for mat in URL_REGEX.find_iter(&line_text) {
                 // Strip trailing punctuation that is commonly not part of URLs
@@ -628,15 +523,13 @@ impl TerminalView {
                     continue;
                 }
 
-                // Convert byte offsets to column indices.
-                // Because the line is built char-by-char from the grid, each char
-                // maps 1:1 to a column only when all characters are single-byte.
-                // Use char_indices for correct mapping.
+                // Convert byte offsets to column indices. Each char maps 1:1 to
+                // a column because the line is built cell by cell.
                 let start_col = line_text[..mat.start()].chars().count();
                 let end_col = start_col + url_str.chars().count() - 1;
 
-                let url_idx = self.detected_urls.len();
-                self.detected_urls.push(DetectedUrl {
+                let url_idx = detected.len();
+                detected.push(DetectedUrl {
                     url: url_str.to_string(),
                 });
 
@@ -647,104 +540,48 @@ impl TerminalView {
                 }
             }
         }
+
+        self.detected_urls = detected;
         self.url_cells = Arc::new(url_cells);
-    }
-
-    /// Get the text content of the current selection
-    pub(super) fn get_selected_text(&self) -> Option<String> {
-        let selection = self.selection?;
-        let terminal = self.terminal.as_ref()?;
-
-        let (start_line, start_col, end_line, end_col) = selection.normalized();
-        let mut result = String::new();
-
-        terminal.with_term(|term| {
-            let content = term.grid();
-            let cols = content.columns();
-            let total_lines = content.screen_lines() as i32;
-            let history = content.history_size() as i32;
-
-            for line_idx in start_line..=end_line {
-                // Selection is in grid coordinates: valid range is -history..screen_lines
-                if line_idx < -history || line_idx >= total_lines {
-                    continue;
-                }
-
-                let col_start = if line_idx == start_line { start_col } else { 0 };
-                let col_end = if line_idx == end_line {
-                    end_col.min(cols - 1)
-                } else {
-                    cols - 1
-                };
-
-                for col_idx in col_start..=col_end {
-                    let point = AlacPoint::new(Line(line_idx), Column(col_idx));
-                    let cell = &content[point];
-                    let c = if cell.c == '\0' { ' ' } else { cell.c };
-                    result.push(c);
-                }
-
-                // Add newline between lines (but not after the last line)
-                if line_idx < end_line {
-                    result.push('\n');
-                }
-            }
-        });
-
-        // Trim trailing whitespace from each line
-        let result: String = result
-            .lines()
-            .map(|line| line.trim_end())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-
-    /// Clear the current text selection
-    pub(super) fn clear_selection(&mut self) {
-        self.selection = None;
-    }
-
-    fn send_mouse_event_to_pty(&self, button: u8, col: usize, row: usize, press: bool) {
-        let col1 = col + 1;
-        let row1 = row + 1;
-        let seq = if self.is_mode_set(TermMode::SGR_MOUSE) {
-            let suffix = if press { 'M' } else { 'm' };
-            format!("\x1b[<{button};{col1};{row1}{suffix}")
-        } else {
-            // X10 mouse encoding: only works for col/row < 96 (byte would overflow readable range)
-            if col1 > 95 || row1 > 95 {
-                return;
-            }
-            let suffix = if press { 'M' } else { 'm' };
-            let _ = suffix; // X10 has no release
-            format!(
-                "\x1b[M{}{}{}",
-                (button + 32) as char,
-                (col1 as u8 + 32) as char,
-                (row1 as u8 + 32) as char
-            )
-        };
-        self.write_to_terminal(seq.as_bytes());
     }
 
     // ========================================================================
     // Mouse handling
     // ========================================================================
 
+    /// Convert a window position to a position relative to the terminal content,
+    /// which is what the mouse encoder expects.
+    fn position_to_element(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            (x - self.content_origin.0).max(0.0),
+            (y - self.content_origin.1).max(0.0),
+        )
+    }
+
     /// Convert mouse position (window coordinates) to cell coordinates
-    fn position_to_cell(&self, x: f32, y: f32) -> (i32, usize) {
-        // Subtract terminal content origin and padding to get relative position
-        let x = (x - self.content_origin.0 - TERMINAL_PADDING).max(0.0);
-        let y = (y - self.content_origin.1 - TERMINAL_PADDING).max(0.0);
-        let col = (x / self.cell_width) as usize;
-        let line = (y / self.cell_height) as i32;
+    fn position_to_cell(&self, x: f32, y: f32) -> (usize, usize) {
+        let (x, y) = self.position_to_element(x, y);
+        let x = (x - TERMINAL_PADDING).max(0.0);
+        let y = (y - TERMINAL_PADDING).max(0.0);
+        let col = (x / self.cell_width.max(1.0)) as usize;
+        let line = (y / self.cell_height.max(1.0)) as usize;
         (line, col)
+    }
+
+    fn mouse_input(
+        &self,
+        x: f32,
+        y: f32,
+        button: mouse::Button,
+        modifiers: &Modifiers,
+    ) -> MouseInput {
+        let (x, y) = self.position_to_element(x, y);
+        MouseInput {
+            x,
+            y,
+            button,
+            mods: input::mods_from_gpui(modifiers),
+        }
     }
 
     /// Handle Ctrl+click to open a URL under the cursor.
@@ -766,7 +603,7 @@ impl TerminalView {
             // received a modifiers-changed event), scan now as a fallback.
             if !self.ctrl_held {
                 self.ctrl_held = true;
-                self.detect_urls_from_cache();
+                self.detect_urls_from_frame();
             }
             self.hovered_url_index = self.url_cells.get(&(screen_line, col)).copied();
         } else {
@@ -775,30 +612,15 @@ impl TerminalView {
     }
 
     /// Handle mouse down event for selection
-    fn handle_mouse_down(&mut self, x: f32, y: f32, ctrl: bool, cx: &mut Context<Self>) {
+    fn handle_mouse_down(&mut self, x: f32, y: f32, modifiers: &Modifiers, cx: &mut Context<Self>) {
         let (screen_line, col) = self.position_to_cell(x, y);
 
-        // If TUI app has mouse reporting enabled, forward the click to PTY.
-        if !ctrl && self.is_mode_set(TermMode::MOUSE_REPORT_CLICK) {
-            self.send_mouse_event_to_pty(0, col, screen_line as usize, true);
-            return;
-        }
-
         // Ctrl+click opens the URL under the cursor
-        if ctrl && self.try_open_url_at(screen_line as usize, col) {
+        if modifiers.control && self.try_open_url_at(screen_line, col) {
             return;
         }
-        // Convert screen coordinates to grid coordinates so selection
-        // remains stable when the viewport is scrolled back
-        let display_offset = self
-            .cached_content
-            .as_ref()
-            .map(|c| c.display_offset)
-            .unwrap_or(0);
-        let line = screen_line - display_offset;
-        let now = Instant::now();
 
-        // Detect double/triple click
+        let now = Instant::now();
         let is_multi_click = self
             .last_click_time
             .map(|t| now.duration_since(t).as_millis() < MULTI_CLICK_THRESHOLD_MS)
@@ -810,189 +632,48 @@ impl TerminalView {
             self.click_count = 1;
         }
         self.last_click_time = Some(now);
+        self.is_dragging = true;
 
-        match self.click_count {
-            1 => {
-                // Single click - start new selection
-                self.selection = Some(TerminalSelection {
-                    start: (line, col),
-                    end: (line, col),
-                });
-                self.is_dragging = true;
-            }
-            2 => {
-                // Double click - select word
-                if let Some(ref terminal) = self.terminal {
-                    let (word_start, word_end) = self.find_word_boundaries(terminal, line, col);
-                    self.selection = Some(TerminalSelection {
-                        start: (line, word_start),
-                        end: (line, word_end),
-                    });
-                }
-            }
-            3 => {
-                // Triple click - select line
-                if let Some(ref terminal) = self.terminal {
-                    let cols = terminal.with_term(|term| term.grid().columns());
-                    self.selection = Some(TerminalSelection {
-                        start: (line, 0),
-                        end: (line, cols.saturating_sub(1)),
-                    });
-                }
-            }
-            _ => {}
+        if let Some(ref terminal) = self.terminal {
+            let input = self.mouse_input(x, y, mouse::Button::Left, modifiers);
+            terminal.mouse_down(input, self.click_count);
         }
 
         cx.notify();
-    }
-
-    /// Find word boundaries at given position
-    fn find_word_boundaries(&self, terminal: &Terminal, line: i32, col: usize) -> (usize, usize) {
-        terminal.with_term(|term| {
-            let content = term.grid();
-            let cols = content.columns();
-            let total_lines = content.screen_lines() as i32;
-            let history = content.history_size() as i32;
-
-            // line is in grid coordinates: valid range is -history..screen_lines
-            if line < -history || line >= total_lines {
-                return (col, col);
-            }
-
-            // Get character at position
-            let get_char = |c: usize| -> char {
-                if c >= cols {
-                    return ' ';
-                }
-                let point = AlacPoint::new(Line(line), Column(c));
-                let cell = &content[point];
-                if cell.c == '\0' { ' ' } else { cell.c }
-            };
-
-            // Check if character is part of a word
-            let is_word_char = |c: char| -> bool { c.is_alphanumeric() || c == '_' };
-
-            let current_char = get_char(col);
-            let is_word = is_word_char(current_char);
-
-            // Find start of word/non-word sequence
-            let mut start = col;
-            while start > 0 {
-                let prev_char = get_char(start - 1);
-                if is_word_char(prev_char) != is_word {
-                    break;
-                }
-                start -= 1;
-            }
-
-            // Find end of word/non-word sequence
-            let mut end = col;
-            while end < cols - 1 {
-                let next_char = get_char(end + 1);
-                if is_word_char(next_char) != is_word {
-                    break;
-                }
-                end += 1;
-            }
-
-            (start, end)
-        })
     }
 
     /// Handle mouse drag event for selection
-    fn handle_mouse_drag(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+    fn handle_mouse_drag(&mut self, x: f32, y: f32, modifiers: &Modifiers) {
         if !self.is_dragging {
             return;
         }
-
-        let (screen_line, col) = self.position_to_cell(x, y);
-        let display_offset = self
-            .cached_content
-            .as_ref()
-            .map(|c| c.display_offset)
-            .unwrap_or(0);
-        let line = screen_line - display_offset;
-
-        if let Some(ref mut selection) = self.selection {
-            selection.end = (line, col);
+        if let Some(ref terminal) = self.terminal {
+            let input = self.mouse_input(x, y, mouse::Button::Left, modifiers);
+            terminal.mouse_drag(input);
         }
-
-        cx.notify();
     }
 
     /// Handle mouse up event
-    fn handle_mouse_up(&mut self, _cx: &mut Context<Self>) {
-        if self.is_mode_set(TermMode::MOUSE_REPORT_CLICK) {
-            // Release events are sent as button=3 in X10, or original button in SGR.
-            // Since we always used left button (0) for down, send release for button 0.
-            // We don't track the last pressed cell, so use cursor position as fallback for now.
-            self.is_dragging = false;
-            return;
-        }
-
+    fn handle_mouse_up(&mut self, x: f32, y: f32, modifiers: &Modifiers) {
         self.is_dragging = false;
-
-        // Clear selection if it's just a single click (no actual range selected)
-        if let Some(ref selection) = self.selection {
-            if selection.start == selection.end {
-                self.selection = None;
-            }
+        if let Some(ref terminal) = self.terminal {
+            let input = self.mouse_input(x, y, mouse::Button::Left, modifiers);
+            terminal.mouse_up(input);
         }
     }
 
     /// Handle scroll wheel event
-    fn handle_scroll(&mut self, delta_y: f32, cx: &mut Context<Self>) {
-        // Read TermMode once to avoid acquiring FairMutex multiple times per scroll event.
-        let mode = self.terminal.as_ref().map(|t| t.mode());
-
-        let mouse_mode = mode
-            .map(|m| m.intersects(TermMode::MOUSE_MODE))
-            .unwrap_or(false);
-
-        if mouse_mode {
-            // Forward scroll to PTY as mouse button 64 (up) or 65 (down).
-            let button = if delta_y > 0.0 { 64u8 } else { 65u8 };
-            self.send_mouse_event_to_pty(button, 0, 0, true);
-            return;
-        }
-
-        let alt_screen = mode
-            .map(|m| m.contains(TermMode::ALT_SCREEN))
-            .unwrap_or(false);
-        let alt_scroll = mode
-            .map(|m| m.contains(TermMode::ALTERNATE_SCROLL))
-            .unwrap_or(false);
-
-        if alt_screen && alt_scroll {
-            // Send arrow keys instead of scrolling (for apps like less in alt screen).
-            let lines = SCROLL_LINES_WHEEL;
-            let key = if delta_y > 0.0 {
-                b"\x1b[A" as &[u8]
-            } else {
-                b"\x1b[B" as &[u8]
-            };
-            for _ in 0..lines {
-                self.write_to_terminal(key);
-            }
-            return;
-        }
-
-        if let Some(ref terminal) = self.terminal {
-            // GPUI scroll: positive delta_y = wheel up = scroll back in history
-            // alacritty Scroll::Delta: positive = scroll up (show older content)
-            let lines = if delta_y > 0.0 {
-                SCROLL_LINES_WHEEL
-            } else {
-                -SCROLL_LINES_WHEEL
-            };
-            terminal.scroll(alacritty_terminal::grid::Scroll::Delta(lines));
+    fn handle_scroll(&mut self, x: f32, y: f32, delta_y: f32, modifiers: &Modifiers) {
+        // GPUI scroll: positive delta_y = wheel up = scroll back in history
+        let lines = if delta_y > 0.0 {
+            SCROLL_LINES_WHEEL
         } else {
-            return;
+            -SCROLL_LINES_WHEEL
+        };
+        if let Some(ref terminal) = self.terminal {
+            let input = self.mouse_input(x, y, mouse::Button::Left, modifiers);
+            terminal.scroll(input, lines);
         }
-        // Scroll is a local operation (no PTY event), so we must
-        // update the cache manually to reflect the new display_offset
-        self.update_content_cache();
-        cx.notify();
     }
 
     // ========================================================================
@@ -1000,23 +681,21 @@ impl TerminalView {
     // ========================================================================
 
     /// Build terminal layout for the paint phase.
-    /// Shares cell data from cache via Arc::clone (O(1) instead of O(rows×cols)).
+    /// Shares row data from the frame via Arc::clone (O(1) instead of O(rows×cols)).
     pub(super) fn build_layout(
         &self,
         cell_width: Pixels,
         line_height: Pixels,
     ) -> Option<TerminalLayout> {
-        let cached = self.cached_content.as_ref()?;
-        let display_cursor_line = cached.cursor.0 + cached.display_offset;
+        let frame = self.frame.as_ref()?;
         Some(TerminalLayout {
-            cells: Arc::clone(&cached.cells),
+            rows: Arc::clone(&frame.rows),
             cell_width,
             line_height,
-            cursor_shape: cached.cursor_shape,
-            cursor: (display_cursor_line, cached.cursor.1),
-            cursor_visible: cached.cursor_visible,
-            display_offset: cached.display_offset,
-            selection: self.selection,
+            cursor: frame.cursor,
+            foreground: rgb_to_hsla(frame.foreground),
+            background: rgb_to_hsla(frame.background),
+            cursor_color: rgb_to_hsla(frame.cursor_color),
             url_cells: Arc::clone(&self.url_cells),
             hovered_url_index: self.hovered_url_index,
             preedit_text: self.preedit_text.clone(),
@@ -1025,7 +704,7 @@ impl TerminalView {
 
     /// Compute caret bounds used by IME/text-input integrations.
     ///
-    /// This uses cursor coordinates from cached terminal content, independent of cursor
+    /// This uses cursor coordinates from the current frame, independent of cursor
     /// visibility/blink state, so platform integrations always have a stable caret anchor.
     pub(super) fn compute_input_cursor_bounds(
         &self,
@@ -1033,20 +712,12 @@ impl TerminalView {
         cell_width: Pixels,
         line_height: Pixels,
     ) -> Option<Bounds<Pixels>> {
-        let cached = self.cached_content.as_ref()?;
-        let (cursor_line, cursor_col) = cached.cursor;
-        let display_cursor_line = cursor_line + cached.display_offset;
-        if display_cursor_line < 0 {
-            return None;
-        }
-        let display_cursor_line = display_cursor_line as usize;
-        let row = cached.cells.get(display_cursor_line)?;
-        if cursor_col >= row.len() {
-            return None;
-        }
+        let frame = self.frame.as_ref()?;
+        let cursor = frame.cursor?;
+        let row = frame.rows.get(cursor.y as usize)?;
+        let cell = row.cells.get(cursor.x as usize)?;
 
-        let cell = &row[cursor_col];
-        let width = if cell.flags.contains(CellFlags::WIDE_CHAR) {
+        let width = if cell.width == CellWidth::Wide {
             cell_width * 2.0
         } else {
             cell_width
@@ -1054,113 +725,14 @@ impl TerminalView {
 
         Some(Bounds::new(
             Point::new(
-                origin.x + cell_width * cursor_col,
-                origin.y + line_height * display_cursor_line,
+                origin.x + cell_width * cursor.x as usize,
+                origin.y + line_height * cursor.y as usize,
             ),
             Size {
                 width,
                 height: line_height,
             },
         ))
-    }
-}
-
-// ============================================================================
-// Color conversion (free functions, used by element.rs paint path)
-// ============================================================================
-
-/// Pre-computed HSLA values for named colors.
-/// Eliminates per-cell RGB→HSLA conversion for the most common color type.
-static NAMED_COLOR_TABLE: LazyLock<[Hsla; 20]> = LazyLock::new(|| {
-    [
-        Hsla::from(rgb(theme::ansi::BLACK)),          // 0: Black
-        Hsla::from(rgb(theme::ansi::RED)),            // 1: Red
-        Hsla::from(rgb(theme::ansi::GREEN)),          // 2: Green
-        Hsla::from(rgb(theme::ansi::YELLOW)),         // 3: Yellow
-        Hsla::from(rgb(theme::ansi::BLUE)),           // 4: Blue
-        Hsla::from(rgb(theme::ansi::MAGENTA)),        // 5: Magenta
-        Hsla::from(rgb(theme::ansi::CYAN)),           // 6: Cyan
-        Hsla::from(rgb(theme::ansi::WHITE)),          // 7: White
-        Hsla::from(rgb(theme::ansi::BRIGHT_BLACK)),   // 8: BrightBlack
-        Hsla::from(rgb(theme::ansi::BRIGHT_RED)),     // 9: BrightRed
-        Hsla::from(rgb(theme::ansi::BRIGHT_GREEN)),   // 10: BrightGreen
-        Hsla::from(rgb(theme::ansi::BRIGHT_YELLOW)),  // 11: BrightYellow
-        Hsla::from(rgb(theme::ansi::BRIGHT_BLUE)),    // 12: BrightBlue
-        Hsla::from(rgb(theme::ansi::BRIGHT_MAGENTA)), // 13: BrightMagenta
-        Hsla::from(rgb(theme::ansi::BRIGHT_CYAN)),    // 14: BrightCyan
-        Hsla::from(rgb(theme::ansi::BRIGHT_WHITE)),   // 15: BrightWhite
-        Hsla::from(rgb(theme::ansi::FOREGROUND)),     // 16: Foreground
-        Hsla::from(rgb(theme::ansi::BACKGROUND)),     // 17: Background
-        Hsla::from(rgb(theme::ansi::CURSOR)),         // 18: Cursor
-        Hsla::from(rgb(theme::ansi::FOREGROUND)),     // 19: fallback
-    ]
-});
-
-pub(super) fn ansi_color_to_hsla(color: AnsiColor) -> Hsla {
-    match color {
-        AnsiColor::Named(named) => named_color_to_hsla(named),
-        AnsiColor::Spec(c) => Hsla::from(gpui::Rgba {
-            r: c.r as f32 / 255.0,
-            g: c.g as f32 / 255.0,
-            b: c.b as f32 / 255.0,
-            a: 1.0,
-        }),
-        AnsiColor::Indexed(idx) => indexed_color_to_hsla(idx),
-    }
-}
-
-pub(super) fn named_color_to_hsla(color: NamedColor) -> Hsla {
-    let idx = match color {
-        NamedColor::Black => 0,
-        NamedColor::Red => 1,
-        NamedColor::Green => 2,
-        NamedColor::Yellow => 3,
-        NamedColor::Blue => 4,
-        NamedColor::Magenta => 5,
-        NamedColor::Cyan => 6,
-        NamedColor::White => 7,
-        NamedColor::BrightBlack => 8,
-        NamedColor::BrightRed => 9,
-        NamedColor::BrightGreen => 10,
-        NamedColor::BrightYellow => 11,
-        NamedColor::BrightBlue => 12,
-        NamedColor::BrightMagenta => 13,
-        NamedColor::BrightCyan => 14,
-        NamedColor::BrightWhite => 15,
-        NamedColor::Foreground => 16,
-        NamedColor::Background => 17,
-        NamedColor::Cursor => 18,
-        _ => 19,
-    };
-    NAMED_COLOR_TABLE[idx]
-}
-
-fn indexed_color_to_hsla(idx: u8) -> Hsla {
-    if idx < 16 {
-        // First 16 indexed colors map to named colors
-        NAMED_COLOR_TABLE[idx as usize]
-    } else if idx < 232 {
-        // 216 color cube (6x6x6)
-        let i = idx - 16;
-        let r = (i / 36) % 6;
-        let g = (i / 6) % 6;
-        let b = i % 6;
-        let to_val = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-        Hsla::from(gpui::Rgba {
-            r: to_val(r) as f32 / 255.0,
-            g: to_val(g) as f32 / 255.0,
-            b: to_val(b) as f32 / 255.0,
-            a: 1.0,
-        })
-    } else {
-        // 24 grayscale colors
-        let gray = 8 + (idx - 232) * 10;
-        Hsla::from(gpui::Rgba {
-            r: gray as f32 / 255.0,
-            g: gray as f32 / 255.0,
-            b: gray as f32 / 255.0,
-            a: 1.0,
-        })
     }
 }
 
@@ -1183,7 +755,7 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let in_alt_screen = self.is_mode_set(TermMode::ALT_SCREEN);
+        let in_alt_screen = self.is_alt_screen();
         Self::trace_input_event(format!(
             "text_for_range req={:?} in_alt_screen={}",
             range_utf16, in_alt_screen
@@ -1211,7 +783,7 @@ impl EntityInputHandler for TerminalView {
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         const RECENT_COMMIT_SELECTION_TTL: Duration = Duration::from_secs(4);
-        let in_alt_screen = self.is_mode_set(TermMode::ALT_SCREEN);
+        let in_alt_screen = self.is_alt_screen();
         Self::trace_input_event(format!("selected_text_range in_alt_screen={in_alt_screen}"));
         if in_alt_screen {
             None
@@ -1331,8 +903,8 @@ impl Render for TerminalView {
             let focus_handle = self.focus_handle.clone();
             self.focus_in_subscription =
                 Some(cx.on_focus_in(&focus_handle, window, |this, _window, _cx| {
-                    if this.is_mode_set(TermMode::FOCUS_IN_OUT) {
-                        this.write_to_terminal(b"\x1b[I");
+                    if let Some(ref terminal) = this.terminal {
+                        terminal.set_focused(true);
                     }
                 }));
         }
@@ -1341,8 +913,8 @@ impl Render for TerminalView {
             self.focus_out_subscription =
                 Some(
                     cx.on_focus_out(&focus_handle, window, |this, _event, _window, _cx| {
-                        if this.is_mode_set(TermMode::FOCUS_IN_OUT) {
-                            this.write_to_terminal(b"\x1b[O");
+                        if let Some(ref terminal) = this.terminal {
+                            terminal.set_focused(false);
                         }
                         // Reset modifier tracking so ctrl_held doesn't get stuck when
                         // the window loses focus (no ModifiersChangedEvent is sent).
@@ -1387,142 +959,41 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::on_terminal_key_down))
             .on_key_up(cx.listener(Self::on_terminal_key_up))
             .on_modifiers_changed(cx.listener(Self::on_terminal_modifiers_changed))
-            // Register action handlers for special keys
-            .on_action(cx.listener(Self::on_enter))
-            .on_action(cx.listener(Self::on_backspace))
-            .on_action(cx.listener(Self::on_tab))
-            .on_action(cx.listener(Self::on_escape))
-            .on_action(cx.listener(Self::on_up))
-            .on_action(cx.listener(Self::on_down))
-            .on_action(cx.listener(Self::on_left))
-            .on_action(cx.listener(Self::on_right))
-            .on_action(cx.listener(Self::on_home))
-            .on_action(cx.listener(Self::on_end))
-            .on_action(cx.listener(Self::on_delete))
-            .on_action(cx.listener(Self::on_page_up))
-            .on_action(cx.listener(Self::on_page_down))
-            .on_action(cx.listener(Self::on_insert))
-            // Function keys
-            .on_action(cx.listener(Self::on_f1))
-            .on_action(cx.listener(Self::on_f2))
-            .on_action(cx.listener(Self::on_f3))
-            .on_action(cx.listener(Self::on_f4))
-            .on_action(cx.listener(Self::on_f5))
-            .on_action(cx.listener(Self::on_f6))
-            .on_action(cx.listener(Self::on_f7))
-            .on_action(cx.listener(Self::on_f8))
-            .on_action(cx.listener(Self::on_f9))
-            .on_action(cx.listener(Self::on_f10))
-            .on_action(cx.listener(Self::on_f11))
-            .on_action(cx.listener(Self::on_f12))
-            // Control keys
-            .on_action(cx.listener(Self::on_ctrl_a))
-            .on_action(cx.listener(Self::on_ctrl_b))
+            // Actions the terminal handles itself instead of forwarding
             .on_action(cx.listener(Self::on_ctrl_c))
-            .on_action(cx.listener(Self::on_ctrl_d))
-            .on_action(cx.listener(Self::on_ctrl_e))
-            .on_action(cx.listener(Self::on_ctrl_f))
-            .on_action(cx.listener(Self::on_ctrl_g))
-            .on_action(cx.listener(Self::on_ctrl_h))
-            .on_action(cx.listener(Self::on_ctrl_i))
-            .on_action(cx.listener(Self::on_ctrl_j))
-            .on_action(cx.listener(Self::on_ctrl_k))
-            .on_action(cx.listener(Self::on_ctrl_l))
-            .on_action(cx.listener(Self::on_ctrl_m))
-            .on_action(cx.listener(Self::on_ctrl_n))
-            .on_action(cx.listener(Self::on_ctrl_o))
-            .on_action(cx.listener(Self::on_ctrl_p))
-            .on_action(cx.listener(Self::on_ctrl_q))
-            .on_action(cx.listener(Self::on_ctrl_r))
-            .on_action(cx.listener(Self::on_ctrl_s))
-            .on_action(cx.listener(Self::on_ctrl_t))
-            .on_action(cx.listener(Self::on_ctrl_u))
             .on_action(cx.listener(Self::on_ctrl_v))
-            .on_action(cx.listener(Self::on_ctrl_w))
-            .on_action(cx.listener(Self::on_ctrl_x))
-            .on_action(cx.listener(Self::on_ctrl_y))
-            .on_action(cx.listener(Self::on_ctrl_z))
-            // Control+symbol keys
-            .on_action(cx.listener(Self::on_ctrl_backslash))
-            .on_action(cx.listener(Self::on_ctrl_bracket_right))
-            .on_action(cx.listener(Self::on_ctrl_caret))
-            .on_action(cx.listener(Self::on_ctrl_underscore))
-            // Alt keys
-            .on_action(cx.listener(Self::on_alt_b))
-            .on_action(cx.listener(Self::on_alt_d))
-            .on_action(cx.listener(Self::on_alt_f))
-            .on_action(cx.listener(Self::on_alt_backspace))
-            // Alt+arrow keys
-            .on_action(cx.listener(Self::on_alt_up))
-            .on_action(cx.listener(Self::on_alt_down))
-            .on_action(cx.listener(Self::on_alt_left))
-            .on_action(cx.listener(Self::on_alt_right))
-            // Shift+arrow keys
-            .on_action(cx.listener(Self::on_shift_up))
-            .on_action(cx.listener(Self::on_shift_down))
-            .on_action(cx.listener(Self::on_shift_left))
-            .on_action(cx.listener(Self::on_shift_right))
-            .on_action(cx.listener(Self::on_shift_home))
-            .on_action(cx.listener(Self::on_shift_end))
+            .on_action(cx.listener(Self::on_ctrl_shift_c))
+            .on_action(cx.listener(Self::on_ctrl_shift_v))
             .on_action(cx.listener(Self::on_shift_insert))
             .on_action(cx.listener(Self::on_shift_page_up))
             .on_action(cx.listener(Self::on_shift_page_down))
-            // Ctrl+arrow keys
-            .on_action(cx.listener(Self::on_ctrl_up))
-            .on_action(cx.listener(Self::on_ctrl_down))
-            .on_action(cx.listener(Self::on_ctrl_left))
-            .on_action(cx.listener(Self::on_ctrl_right))
-            // Ctrl+Shift keys
-            .on_action(cx.listener(Self::on_ctrl_shift_up))
-            .on_action(cx.listener(Self::on_ctrl_shift_down))
-            .on_action(cx.listener(Self::on_ctrl_shift_left))
-            .on_action(cx.listener(Self::on_ctrl_shift_right))
-            .on_action(cx.listener(Self::on_ctrl_shift_c))
-            .on_action(cx.listener(Self::on_ctrl_shift_v))
-            // Ctrl+Alt+arrow keys
-            .on_action(cx.listener(Self::on_ctrl_alt_up))
-            .on_action(cx.listener(Self::on_ctrl_alt_down))
-            .on_action(cx.listener(Self::on_ctrl_alt_left))
-            .on_action(cx.listener(Self::on_ctrl_alt_right))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     window.focus(&this.focus_handle, cx);
                     let x: f32 = event.position.x.into();
                     let y: f32 = event.position.y.into();
-                    let ctrl = event.modifiers.control;
-                    this.handle_mouse_down(x, y, ctrl, cx);
+                    this.handle_mouse_down(x, y, &event.modifiers, cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 let x: f32 = event.position.x.into();
                 let y: f32 = event.position.y.into();
 
-                // Read TermMode once to avoid acquiring FairMutex multiple times per event.
-                let mode = this.terminal.as_ref().map(|t| t.mode());
-
-                // If MOUSE_MOTION mode: send every move; if MOUSE_DRAG: only send when dragging.
-                if mode.map_or(false, |m| m.contains(TermMode::MOUSE_MOTION)) {
-                    let (screen_line, col) = this.position_to_cell(x, y);
-                    this.send_mouse_event_to_pty(32, col, screen_line as usize, true);
-                    return;
-                } else if this.is_dragging
-                    && mode.map_or(false, |m| m.contains(TermMode::MOUSE_DRAG))
-                {
-                    let (screen_line, col) = this.position_to_cell(x, y);
-                    this.send_mouse_event_to_pty(32, col, screen_line as usize, true);
-                }
-
                 if this.is_dragging {
-                    this.handle_mouse_drag(x, y, cx);
-                    return;
+                    this.handle_mouse_drag(x, y, &event.modifiers);
+                } else if this.mouse_tracking() {
+                    if let Some(ref terminal) = this.terminal {
+                        let input = this.mouse_input(x, y, mouse::Button::Left, &event.modifiers);
+                        terminal.mouse_move(input);
+                    }
                 }
 
                 // URL hover check only when Ctrl is held
                 if event.modifiers.control {
                     let (screen_line, col) = this.position_to_cell(x, y);
                     let prev = this.hovered_url_index;
-                    this.update_hovered_url(screen_line as usize, col, true);
+                    this.update_hovered_url(screen_line, col, true);
                     if this.hovered_url_index != prev {
                         cx.notify();
                     }
@@ -1533,14 +1004,18 @@ impl Render for TerminalView {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _event: &gpui::MouseUpEvent, _window, cx| {
-                    this.handle_mouse_up(cx);
+                cx.listener(|this, event: &gpui::MouseUpEvent, _window, _cx| {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    this.handle_mouse_up(x, y, &event.modifiers);
                 }),
             )
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, _cx| {
                 let delta = event.delta.pixel_delta(Pixels::from(16.0));
                 let y: f32 = delta.y.into();
-                this.handle_scroll(y, cx);
+                let position_x: f32 = event.position.x.into();
+                let position_y: f32 = event.position.y.into();
+                this.handle_scroll(position_x, position_y, y, &event.modifiers);
             }))
             .child(
                 // Wrapper div as flex container for proper layout propagation

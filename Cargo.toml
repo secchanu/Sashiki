@@ -22,7 +22,10 @@ lang-html = ["dep:tree-sitter-html"]
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 
 # Terminal emulation
-alacritty_terminal = "0.25.1"
+libghostty-vt = "0.2.1"
+
+# Pseudo terminal (ConPTY on Windows, openpty elsewhere)
+portable-pty = "0.9"
 
 # Glob pattern matching (for session template file copy)
 glob = "0.3"
