@@ -20,8 +20,15 @@ Worktree切替、ターミナル操作、すべてが一瞬。
 
 ## ビルド
 
-libghostty-vt をソースからビルドするため、Rust に加えて Zig 0.16.x が必要。
+libghostty-vt をソースからビルドするため、Rust に加えて Zig が必要。
 
 ```sh
+mise install
 cargo build --release
+```
+
+Windows ではこれに加えて MSVC ビルドツールと、git の long path 対応が必要。
+
+```sh
+git config --global core.longpaths true
 ```
