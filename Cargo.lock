@@ -2754,8 +2754,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6219ed1c364b3ef5815fb0fd2acc0662f792adc706dabf59b7ca89280ee6d066"
+source = "git+https://github.com/secchanu/libghostty-rs?branch=fix%2Fwindows-static-link#30ba3a01bddfebd193beccd33cff09cf2e7123fb"
 dependencies = [
  "bitflags 2.13.1",
  "int-enum",
@@ -2765,8 +2764,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "865fed12a8b2bba3507b3bccd0bef439e06ef1100e652fe6b71d132c41ee8db0"
+source = "git+https://github.com/secchanu/libghostty-rs?branch=fix%2Fwindows-static-link#30ba3a01bddfebd193beccd33cff09cf2e7123fb"
 
 [[package]]
 name = "libloading"

@@ -92,3 +92,12 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 1
+
+# libghostty-vt-sys 0.2.1 asks MSVC for `ghostty-vt`, which resolves to the DLL
+# import library beside the archive it meant, turning a static link dynamic.
+# Zig's Windows shared libraries do not run C++ static initializers, so simdutf
+# never initializes inside that DLL and any non-ASCII byte kills the process.
+# The fork names the archive explicitly on Windows. Drop it once upstream does.
+[patch.crates-io]
+libghostty-vt = { git = "https://github.com/secchanu/libghostty-rs", branch = "fix/windows-static-link" }
+libghostty-vt-sys = { git = "https://github.com/secchanu/libghostty-rs", branch = "fix/windows-static-link" }

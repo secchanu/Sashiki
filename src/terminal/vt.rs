@@ -999,3 +999,44 @@ fn apply_theme(terminal: &mut Terminal<'static, 'static>) -> anyhow::Result<()> 
     terminal.set_default_cursor_color(Some(rgb_from_u32(theme::ansi::CURSOR)))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mislinked libghostty-vt takes the first non-ASCII byte down with it,
+    /// which a suite that only ever writes ASCII would not notice.
+    #[test]
+    fn vt_write_accepts_multibyte_text() {
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols: INITIAL_COLS,
+            rows: INITIAL_ROWS,
+            max_scrollback: MAX_SCROLLBACK_BYTES,
+        })
+        .unwrap();
+        apply_theme(&mut terminal).unwrap();
+
+        terminal.vt_write("新機能と improvements と émoji 🎌\r\n".as_bytes());
+
+        let mut render = RenderState::new().unwrap();
+        let mut rows = RowIterator::new().unwrap();
+        let mut cells = CellIterator::new().unwrap();
+        let snapshot = render.update(&terminal).unwrap();
+
+        let mut first = None;
+        {
+            let mut row_iteration = rows.update(&snapshot).unwrap();
+            while let Some(row) = row_iteration.next() {
+                let text = build_row(row, &mut cells, INITIAL_COLS).text();
+                if first.is_none() {
+                    first = Some(text);
+                }
+            }
+        }
+
+        assert!(
+            first.as_deref().unwrap_or_default().contains("新機能"),
+            "expected the written text back, got {first:?}"
+        );
+    }
+}
